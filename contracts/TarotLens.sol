@@ -164,7 +164,6 @@ contract TarotLens {
         address otherToken,
         address stratusALPTAddress
     ) internal view returns (BorrowableInfo memory) {
-        IBorrowable borrowable = IBorrowable(borrowableAddress);
         uint256 totalBorrows = BStorage(borrowableAddress).totalBorrows();
         uint256 totalCash = PoolToken(borrowableAddress).totalBalance();
         uint256 totalSupply = totalBorrows + totalCash;

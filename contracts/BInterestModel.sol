@@ -30,7 +30,12 @@ contract BInterestRateModel is PoolToken, BStorage {
         uint32 _rateUpdateTimestamp = rateUpdateTimestamp;
 
         // update kinkBorrowRate using previous borrowRate
-        uint32 timeElapsed = getBlockTimestamp() - _rateUpdateTimestamp; // underflow is desired
+        uint32 timeElapsed;
+        unchecked {
+            // uint32 timestamp wrap (~year 2106) is intentional; without `unchecked` the
+            // 0.8 subtraction would revert and permanently brick rate updates.
+            timeElapsed = getBlockTimestamp() - _rateUpdateTimestamp;
+        }
         if (timeElapsed > 0) {
             rateUpdateTimestamp = getBlockTimestamp();
             uint256 adjustFactor;
@@ -85,7 +90,11 @@ contract BInterestRateModel is PoolToken, BStorage {
 
         uint32 blockTimestamp = getBlockTimestamp();
         if (_accrualTimestamp == blockTimestamp) return;
-        uint32 timeElapsed = blockTimestamp - _accrualTimestamp; // underflow is desired
+        uint32 timeElapsed;
+        unchecked {
+            // wrap at the uint32 timestamp boundary is intentional (see _calculateBorrowRate).
+            timeElapsed = blockTimestamp - _accrualTimestamp;
+        }
         accrualTimestamp = blockTimestamp;
 
         uint256 interestFactor = uint256(borrowRate) * timeElapsed;

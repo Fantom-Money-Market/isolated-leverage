@@ -8,7 +8,6 @@ import "./interfaces/ICDeployer.sol";
 import "./interfaces/ICollateral.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./interfaces/IStratusALPT.sol";
-import "./interfaces/ITarotPriceOracle.sol";
 import "./LendingPoolStruct.sol";
 
 contract TarotFactory is IFactory {
@@ -35,7 +34,6 @@ contract TarotFactory is IFactory {
 
     IBDeployer public immutable bDeployer;
     ICDeployer public immutable cDeployer;
-    ITarotPriceOracle public immutable tarotPriceOracle;
 
     // --- Events ---
 
@@ -64,14 +62,12 @@ contract TarotFactory is IFactory {
         address _admin,
         address _reservesAdmin,
         IBDeployer _bDeployer,
-        ICDeployer _cDeployer,
-        ITarotPriceOracle _tarotPriceOracle
+        ICDeployer _cDeployer
     ) {
         admin = _admin;
         reservesAdmin = _reservesAdmin;
         bDeployer = _bDeployer;
         cDeployer = _cDeployer;
-        tarotPriceOracle = _tarotPriceOracle;
         emit NewAdmin(address(0), _admin);
         emit NewReservesAdmin(address(0), _reservesAdmin);
     }
@@ -155,12 +151,11 @@ contract TarotFactory is IFactory {
             revert Borrowable1NotCreated();
         }
 
-        // Check and initialize price oracle if not already initialized for this pair
-        (, , , , , bool oracleInitialized) =
-            tarotPriceOracle.getPair(stratusALPT);
-        if (!oracleInitialized) {
-            tarotPriceOracle.initialize(stratusALPT);
-        }
+        // NOTE: the external TarotPriceOracle is no longer used. Collateral.getPrices()
+        // now reads the underlying's own manipulation-resistant safe surface
+        // (getTotalValueSafe / twapPrice), so there is no per-pair oracle to initialize.
+        // Calling it here would also revert for venues without a UniV3 pool (e.g. the
+        // Beets adapter), bricking pool creation.
 
         // Initialize collateral and borrowable tokens
         ICollateral(lPool.collateral)._initialize(

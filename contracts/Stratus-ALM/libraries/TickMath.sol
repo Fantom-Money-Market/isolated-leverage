@@ -23,7 +23,7 @@ library TickMath {
     /// @param tick The input tick for the above formula
     /// @return sqrtPriceX96 A Fixed point Q64.96 number representing the sqrt of the ratio of the two assets (token1/token0)
     /// at the given tick
-    function getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
+    function getSqrtRatioAtTick(int24 tick) public pure returns (uint160 sqrtPriceX96) {
         unchecked {
             uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
             if (absTick > uint256(int256(MAX_TICK))) revert T();

@@ -18,5 +18,6 @@ contract CDeployer is ICDeployer {
 		assembly {
 			collateral := create2(0, add(bytecode, 32), mload(bytecode), salt)
 		}
+		require(collateral != address(0), "CREATE2_FAILED");
 	}
 }

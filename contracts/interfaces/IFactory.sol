@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import "./ITarotPriceOracle.sol";
 import "./IBDeployer.sol";
 import "./ICDeployer.sol";
 import "../LendingPoolStruct.sol";
@@ -19,7 +18,6 @@ interface IFactory {
     function allLendingPoolsLength() external view returns (uint256);
     function bDeployer() external view returns (IBDeployer);
     function cDeployer() external view returns (ICDeployer);
-    function tarotPriceOracle() external view returns (ITarotPriceOracle);
 
     // --- State-Changing Functions ---
     function createCollateral(address stratusALPT) external returns (address collateral);

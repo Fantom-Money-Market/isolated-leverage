@@ -5,11 +5,8 @@ import "./PoolToken.sol";
 import "./interfaces/IBorrowable.sol";
 import "./interfaces/ICollateral.sol";
 import "./interfaces/IFactory.sol";
-import "./interfaces/ITarotPriceOracle.sol";
 import "./interfaces/ITarotCallee.sol";
 import "./interfaces/IStratusALPT.sol";
-import "./interfaces/IUniswapV3Pool.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract Collateral is ICollateral, PoolToken {
     // --- Custom Errors ---
@@ -22,13 +19,16 @@ contract Collateral is ICollateral, PoolToken {
     // --- State Variables (formerly CStorage) ---
     address public borrowable0;
     address public borrowable1;
-    address public tarotPriceOracle;
+    
+    // --- Collateral Parameters ---
+    uint256 public safetyMarginSqrt = 1414213562373095049; // sqrt(2) * 1e18 ≈ 141.42% safety margin
+    uint256 public liquidationIncentive = 1050000000000000000; // 105% liquidation incentive
 
     // --- Constants ---
     uint256 public constant SAFETY_MARGIN_SQRT_MIN = 1e18; // safetyMargin: 100%
     uint256 public constant SAFETY_MARGIN_SQRT_MAX = 1581138840000000000; // safetyMargin: 250%
     uint256 public constant LIQUIDATION_INCENTIVE_MIN = 1e18; // 100%
-    uint256 public constant LIQUIDATION_INCENTIVE_MAX = 1040000000000000000; // 105%
+    uint256 public constant LIQUIDATION_INCENTIVE_MAX = 1050000000000000000; // 105%
 
     // --- Events ---
     // Events are inherited from ICollateral interface
@@ -50,7 +50,6 @@ contract Collateral is ICollateral, PoolToken {
         underlying = _underlying;
         borrowable0 = _borrowable0;
         borrowable1 = _borrowable1;
-        tarotPriceOracle = address(IFactory(factory).tarotPriceOracle());
     }
 
     // Override functions that are defined in multiple base contracts
@@ -112,25 +111,26 @@ contract Collateral is ICollateral, PoolToken {
 
     /*** Collateralization Model ***/
 
+    /// @notice Collateral price of one underlying (LP/ALPT/adapter) token in each
+    ///         borrowable token. Sourced entirely from the underlying's manipulation-
+    ///         resistant safe surface (TWAP for CL vaults, rate providers for the Beets
+    ///         adapter) — no spot slot0 read and no external TWAP-oracle reconciliation.
+    /// @dev price_i has units "collateral tokens per token_i" (1e18-scaled), i.e.
+    ///      supply / value_in_token_i, exactly as _calculateLiquidity and seize expect.
+    ///      Generalizes the old 50/50 `total*2` assumption to the real safe value, so it
+    ///      is correct for weighted/stable pools too.
     function getPrices() public view returns (uint256 price0, uint256 price1) {
-        (uint224 twapPrice112x112, ) = ITarotPriceOracle(tarotPriceOracle).getResult(underlying);
-        
-        (uint256 total0, uint256 total1) = IStratusALPT(underlying).getTotalAmounts();
-        uint256 collateralTotalSupply = IStratusALPT(underlying).totalSupply();
+        uint256 supply = IStratusALPT(underlying).totalSupply();
+        uint256 valueInToken1 = IStratusALPT(underlying).getTotalValueSafe(); // token1 base units
+        uint256 priceToken0In1 = IStratusALPT(underlying).twapPrice();        // token0 in token1, 1e18
 
-        address poolAddress = IStratusALPT(underlying).pool();
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(poolAddress).slot0();
-        
-        uint256 currentPrice112x112 = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 80;
+        if (supply == 0 || valueInToken1 == 0 || priceToken0In1 == 0) revert PriceCalculationError();
 
-        uint256 adjustmentSquared = (uint256(twapPrice112x112) * (2**32)) / currentPrice112x112;
-        uint256 adjustment = Math.sqrt(adjustmentSquared * (2**32));
+        // Whole-position value expressed in token0 base units.
+        uint256 valueInToken0 = (valueInToken1 * 1e18) / priceToken0In1;
 
-        uint256 currentBorrowable0Price = (collateralTotalSupply * 1e18) / (total0 * 2);
-        uint256 currentBorrowable1Price = (collateralTotalSupply * 1e18) / (total1 * 2);
-
-        price0 = (currentBorrowable0Price * adjustment) / (2**32);
-        price1 = (currentBorrowable1Price * (2**32)) / adjustment;
+        price0 = (supply * 1e18) / valueInToken0;
+        price1 = (supply * 1e18) / valueInToken1;
 
         if (price0 <= 100 || price1 <= 100) revert PriceCalculationError();
     }

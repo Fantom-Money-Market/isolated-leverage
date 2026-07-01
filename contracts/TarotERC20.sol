@@ -121,8 +121,12 @@ contract TarotERC20 is IERC20, IERC20Metadata {
         bytes32 r,
         bytes32 s,
         bytes32 typehash
-    ) internal view {
+    ) internal {
         if (deadline < block.timestamp) revert Expired();
+        // Read-then-consume the nonce so the signature cannot be replayed. The previous
+        // version was `view` and never incremented, which left borrowPermit replayable
+        // (a revoked borrow allowance could be re-granted with an old signature).
+        uint256 currentNonce = nonces[owner];
         bytes32 digest =
             keccak256(
                 abi.encodePacked(
@@ -131,42 +135,6 @@ contract TarotERC20 is IERC20, IERC20Metadata {
                     keccak256(
                         abi.encode(
                             typehash,
-                            owner,
-                            spender,
-                            value,
-                            nonces[owner],
-                            deadline
-                        )
-                    )
-                )
-            );
-        address recoveredAddress = ecrecover(digest, v, r, s);
-        if (recoveredAddress == address(0) || recoveredAddress != owner) {
-            revert InvalidSignature();
-        }
-    }
-
-    function permit(
-        address owner,
-        address spender,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external {
-        // Use a unique nonce for each permit
-        uint256 currentNonce = nonces[owner];
-        nonces[owner] = currentNonce + 1;
-
-        bytes32 digest =
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    DOMAIN_SEPARATOR,
-                    keccak256(
-                        abi.encode(
-                            PERMIT_TYPEHASH,
                             owner,
                             spender,
                             value,
@@ -180,6 +148,20 @@ contract TarotERC20 is IERC20, IERC20Metadata {
         if (recoveredAddress == address(0) || recoveredAddress != owner) {
             revert InvalidSignature();
         }
+        nonces[owner] = currentNonce + 1;
+    }
+
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        // Single nonce-consuming path shared with borrowPermit (see _checkSignature).
+        _checkSignature(owner, spender, value, deadline, v, r, s, PERMIT_TYPEHASH);
         _approve(owner, spender, value);
     }
 }

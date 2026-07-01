@@ -18,5 +18,6 @@ contract BDeployer is IBDeployer {
 		assembly {
 			borrowable := create2(0, add(bytecode, 32), mload(bytecode), salt)
 		}
+		require(borrowable != address(0), "CREATE2_FAILED");
 	}
 }
