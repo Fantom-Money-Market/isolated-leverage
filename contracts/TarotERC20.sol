@@ -22,8 +22,13 @@ contract TarotERC20 is IERC20, IERC20Metadata {
     mapping(address => uint256) public override balanceOf;
     mapping(address => mapping(address => uint256)) public override allowance;
 
-    bytes32 public DOMAIN_SEPARATOR;
     mapping(address => uint256) public nonces;
+
+    // Cached at _setName time; DOMAIN_SEPARATOR() below recomputes on the fly if the
+    // live chainid ever diverges from what's cached (see DOMAIN_SEPARATOR doc comment).
+    bytes32 private _cachedDomainSeparator;
+    uint256 private _cachedChainId;
+    bytes32 private _hashedName;
 
     // --- Events ---
     // Transfer and Approval events are inherited from IERC20
@@ -38,17 +43,39 @@ contract TarotERC20 is IERC20, IERC20Metadata {
     function _setName(string memory _name, string memory _symbol) internal {
         name = _name;
         symbol = _symbol;
-        DOMAIN_SEPARATOR = keccak256(
+        _hashedName = keccak256(bytes(_name));
+        _cachedChainId = block.chainid;
+        _cachedDomainSeparator = _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(
             abi.encode(
                 keccak256(
                     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
                 ),
-                keccak256(bytes(_name)),
+                _hashedName,
                 keccak256(bytes("1")),
                 block.chainid,
                 address(this)
             )
         );
+    }
+
+    /// @notice EIP-712 domain separator. The original UniswapV2ERC20-style implementation
+    ///         computed this once at deploy time and cached it in a plain state variable —
+    ///         a pre-0.8-era pattern with a real gap: if the chain ever hard-forks such that
+    ///         a copy of this contract ends up live on a new chainid, the stale separator
+    ///         (still encoding the OLD chainid) would keep validating signatures meant only
+    ///         for the original chain, letting a permit/borrowPermit be replayed across both
+    ///         post-fork chains. This checks the live chainid against what's cached and
+    ///         recomputes on the fly if they've diverged — same construction OZ's EIP712
+    ///         base contract uses.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _cachedChainId) {
+            return _cachedDomainSeparator;
+        }
+        return _buildDomainSeparator();
     }
 
     function _mint(address to, uint256 value) internal {
@@ -131,7 +158,7 @@ contract TarotERC20 is IERC20, IERC20Metadata {
             keccak256(
                 abi.encodePacked(
                     "\x19\x01",
-                    DOMAIN_SEPARATOR,
+                    DOMAIN_SEPARATOR(),
                     keccak256(
                         abi.encode(
                             typehash,

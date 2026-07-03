@@ -9,6 +9,7 @@ contract PoolToken is IPoolToken, TarotERC20 {
     // --- Custom Errors ---
     error FactoryAlreadySet();
     error MintAmountZero();
+    error MintAmountTooSmall();
     error RedeemAmountZero();
     error InsufficientCash();
     error TransferFailed();
@@ -64,13 +65,16 @@ contract PoolToken is IPoolToken, TarotERC20 {
         mintTokens = (mintAmount * 1e18) / exchangeRate();
 
         if (totalSupply == 0) {
-            // permanently lock the first MINIMUM_LIQUIDITY tokens
+            // permanently lock the first MINIMUM_LIQUIDITY tokens. Explicit check instead of
+            // letting the subtraction underflow-revert with a bare Panic(0x11): a first
+            // deposit too small to clear the floor now fails with a clear reason.
+            if (mintTokens <= MINIMUM_LIQUIDITY) revert MintAmountTooSmall();
             mintTokens -= MINIMUM_LIQUIDITY;
             _mint(address(0), MINIMUM_LIQUIDITY);
         }
         if (mintTokens == 0) revert MintAmountZero();
         _mint(minter, mintTokens);
-        emit Mint(msg.sender, minter, mintAmount, mintTokens); 
+        emit Mint(msg.sender, minter, mintAmount, mintTokens);
     }
 
     // this low-level function should be called from another contract

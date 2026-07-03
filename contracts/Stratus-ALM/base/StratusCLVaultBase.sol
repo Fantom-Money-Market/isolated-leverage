@@ -437,7 +437,7 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
     ///      instead makes the deployed capital share match the configured weight directly.
     function _reqAtRange(int24 lower, int24 upper, uint160 sqrtP, uint256 w)
         internal
-        view
+        pure
         returns (uint256 r0, uint256 r1)
     {
         (uint256 u0, uint256 u1) = LiquidityAmounts.getAmountsForLiquidity(
@@ -594,8 +594,14 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
         if (lower >= upper) upper = lower + tickSpacing;
     }
 
+    /// @dev Align a tick DOWN to the nearest multiple of tickSpacing. Solidity integer
+    ///      division truncates toward zero, which for negative ticks rounds UP — so a bare
+    ///      (tick / tickSpacing) * tickSpacing would misplace ranges on the negative side of
+    ///      the price. Adjust by one spacing when there's a negative remainder to true-floor.
     function _align(int24 tick) internal view returns (int24) {
-        return (tick / tickSpacing) * tickSpacing;
+        int24 aligned = (tick / tickSpacing) * tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) aligned -= tickSpacing;
+        return aligned;
     }
 
     function _halfWidthMult(uint256 i) private pure returns (int24) {
