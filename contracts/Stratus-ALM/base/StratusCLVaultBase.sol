@@ -72,7 +72,7 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
     ///         reverts. There is deliberately NO time cooldown: the vault must be free to rebalance
     ///         whenever it is genuinely skewed (e.g. every block during a fast move / out-of-range);
     ///         a time lock would strand it out-of-range. A tiny per-trade drift never trips it.
-    uint256 public minSkewBps = 8000; // 80%
+    uint256 public minSkewBps = 6000; // 60%
 
     event RebalanceParamsSet(uint256 deviationCapBps, uint256 bountyBps, uint256 rewardBountyBps, uint256 minSkewBps);
 

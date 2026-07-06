@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.27;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./interfaces/ITarotCallee.sol";
+
+interface IUnwindVault {
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function withdraw(uint256 shares, address to, uint256 minAmount0, uint256 minAmount1)
+        external
+        returns (uint256, uint256);
+}
+
+interface IUnwindBorrowable {
+    function borrow(address borrower, address receiver, uint256 borrowAmount, bytes calldata data) external;
+    function borrowBalance(address borrower) external view returns (uint256);
+    function exchangeRate() external returns (uint256); // accrue-modified: syncs interest
+}
+
+interface IUnwindCollateral {
+    function underlying() external view returns (address);
+    function borrowable0() external view returns (address);
+    function borrowable1() external view returns (address);
+    function exchangeRate() external returns (uint256);
+    function flashRedeem(address redeemer, uint256 redeemAmount, bytes calldata data) external;
+}
+
+/// @notice One-call deleverage for Stratus ALPT pools.
+/// @dev Liquidity is the borrower's own ALPT collateral (cToken → underlying), never the
+///      lend-side borrowable cash pools. flashRedeem temporarily releases ALPT; we break
+///      it, repay debt, then pull cTokens from the borrower (after debt is reduced) to
+///      complete the burn — matching Impermax's callback ordering.
+contract UnwindRouter is ITarotCallee {
+    using SafeERC20 for IERC20;
+
+    error Unauthorized();
+    error BadCollateral();
+    error NothingToDo();
+
+    struct UnwindContext {
+        address collateral;
+        address borrower;
+        address vault;
+        address borrowable0;
+        address borrowable1;
+        uint256 cTokenAmount;
+        uint256 minAmount0;
+        uint256 minAmount1;
+    }
+
+    address private expectedCaller;
+
+    /// @param cTokenAmount cTokens the borrower will post to complete the redeem (approve router).
+    /// @param minAmount0/minAmount1 Slippage floors on vault withdraw.
+    function deleverage(
+        address collateral,
+        uint256 cTokenAmount,
+        uint256 minAmount0,
+        uint256 minAmount1
+    ) external {
+        if (expectedCaller != address(0)) revert Unauthorized();
+        if (cTokenAmount <= 1) revert NothingToDo();
+
+        IUnwindCollateral col = IUnwindCollateral(collateral);
+        address vault = col.underlying();
+        address b0 = col.borrowable0();
+        address b1 = col.borrowable1();
+        if (vault == address(0) || b0 == address(0) || b1 == address(0)) revert BadCollateral();
+
+        // Impermax uses (tokens - 1) so declaredRedeemTokens fits in the post-callback burn.
+        uint256 rate = col.exchangeRate();
+        uint256 redeemAmount = ((cTokenAmount - 1) * rate) / 1e18;
+        if (redeemAmount == 0) revert NothingToDo();
+
+        UnwindContext memory ctx = UnwindContext({
+            collateral: collateral,
+            borrower: msg.sender,
+            vault: vault,
+            borrowable0: b0,
+            borrowable1: b1,
+            cTokenAmount: cTokenAmount,
+            minAmount0: minAmount0,
+            minAmount1: minAmount1
+        });
+
+        expectedCaller = collateral;
+        col.flashRedeem(address(this), redeemAmount, abi.encode(ctx));
+        expectedCaller = address(0);
+    }
+
+    /// @inheritdoc ITarotCallee
+    /// @dev Collateral.flashRedeem calls tarotRedeem(msg.sender, …) where msg.sender is
+    ///      this router — same pattern as LeverageRouter.tarotBorrow.
+    function tarotRedeem(address sender, uint256 amount, bytes calldata data) external {
+        if (msg.sender != expectedCaller || sender != address(this)) revert Unauthorized();
+        UnwindContext memory ctx = abi.decode(data, (UnwindContext));
+
+        IUnwindVault vault = IUnwindVault(ctx.vault);
+        (uint256 out0, uint256 out1) =
+            vault.withdraw(amount, address(this), ctx.minAmount0, ctx.minAmount1);
+
+        // Repay first — reduces debt before the cToken pull is health-checked.
+        _repayAndRefund(ctx.borrowable0, vault.token0(), ctx.borrower, out0);
+        _repayAndRefund(ctx.borrowable1, vault.token1(), ctx.borrower, out1);
+
+        // Complete the flash redeem burn (post-repay solvency).
+        IERC20(ctx.collateral).safeTransferFrom(ctx.borrower, ctx.collateral, ctx.cTokenAmount);
+    }
+
+    /// @inheritdoc ITarotCallee
+    function tarotBorrow(address, address, uint256, bytes calldata) external pure {
+        revert Unauthorized();
+    }
+
+    function _repayAndRefund(
+        address borrowable,
+        address token,
+        address borrower,
+        uint256 amountMax
+    ) internal {
+        if (amountMax == 0) return;
+        // Force an interest accrual before reading the debt. borrowBalance() is a view
+        // over the LAST-accrued borrow index, so without this the repay comes up short by
+        // whatever interest accrued since — dust, but a full unwind leaves zero collateral
+        // behind, and zero collateral against any dust debt fails tokensUnlocked and
+        // reverts the whole tx with InsufficientLiquidity. (Impermax's router does this
+        // same exchangeRate() poke before its repay for exactly this reason.)
+        IUnwindBorrowable(borrowable).exchangeRate();
+        uint256 debt = IUnwindBorrowable(borrowable).borrowBalance(borrower);
+        uint256 repay = amountMax < debt ? amountMax : debt;
+        if (repay > 0) {
+            IERC20(token).safeTransfer(borrowable, repay);
+            IUnwindBorrowable(borrowable).borrow(borrower, address(0), 0, "");
+        }
+        uint256 refund = amountMax - repay;
+        if (refund > 0) {
+            IERC20(token).safeTransfer(borrower, refund);
+        }
+    }
+}

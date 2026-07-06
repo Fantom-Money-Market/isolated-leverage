@@ -20,9 +20,11 @@ const config: HardhatUserConfig = {
       chainId: 31337,
       hardfork: "cancun",
       forking: { url: SONIC_RPC },
-      // The underlying fork state is still real Sonic (146) history; only the
-      // JSON-RPC-reported chainId changes, which is all a wallet keys off of.
       chains: { 146: { hardforkHistory: { cancun: 0 } } },
+    },
+    localhost: {
+      url: "http://127.0.0.1:8545",
+      chainId: 31337,
     },
   },
   paths: {

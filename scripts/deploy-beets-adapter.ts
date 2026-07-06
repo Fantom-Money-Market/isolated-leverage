@@ -5,6 +5,7 @@ import { ethers } from "hardhat";
 //   BPT=0x.. PRIVATE_KEY=0x.. npx hardhat run scripts/deploy-beets-adapter.ts --network sonic --config hardhat.config.stratus.ts
 const VAULT = "0xbA1333333333a1BA1108E8412f11850A5C319bA9"; // Beets v3 Vault (Sonic)
 const BPT = process.env.BPT || "0x75b000584a7d86fb3ef5e15ba26f4c52b41be0e9"; // stS-wS
+const GAUGE = process.env.GAUGE || "0xaE647ea922D392cC825c51967382940A30893f6D"; // stS-wS gauge
 
 async function main() {
   const pk = process.env.PRIVATE_KEY;
@@ -16,17 +17,19 @@ async function main() {
   const symbol = "s-" + sym;
 
   const A = await ethers.getContractFactory("StratusBeetsV3Adapter", signer);
-  const a = await A.deploy(VAULT, BPT, name, symbol);
+  const a = await A.deploy(VAULT, BPT, GAUGE, name, symbol);
   await a.waitForDeployment();
   const addr = await a.getAddress();
 
   console.log("adapter      :", addr);
   console.log("name/symbol  :", name, "/", symbol);
   console.log("bpt          :", await a.bpt());
+  console.log("gauge        :", await a.gauge());
   console.log("token0       :", await a.token0());
   console.log("token1       :", await a.token1());
   console.log("twapPrice    :", (await a.twapPrice()).toString());
   console.log("\nUse", addr, "as the `underlying` when creating the Tarot lending market.");
+  console.log("Then call setRewardTokens([BEETS, stS]) on the adapter owner.");
 }
 
 main().catch((e) => {

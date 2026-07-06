@@ -206,6 +206,15 @@ contract Collateral is ICollateral, PoolToken {
     ///         invoked from claimVaultRewards so a claim is always up to date.
     /// @dev No-ops (never reverts) when the underlying has no reward surface (Beets
     ///      adapter) or no supply exists yet, so it is safe to call unconditionally.
+    /// @dev claimRewards() is deliberately NOT wrapped in try/catch (unlike
+    ///      rewardTokensList() above, which legitimately no-ops for underlyings that don't
+    ///      implement the interface at all). A try/catch here let a starved nested call
+    ///      fail silently while the outer tx still reported success — worse, it gave gas
+    ///      estimators two divergent "non-reverting" outcomes (inner call succeeds, or
+    ///      inner call is caught) to converge on, so an estimate could settle on the
+    ///      cheaper catch-path and under-fund the real one. A live test reproduced exactly
+    ///      that: the call returned success but silently moved nothing. Reverting loudly on
+    ///      genuine failure is the safer default for a fund-moving step.
     function harvestVaultRewards() public {
         uint256 supply = totalSupply;
         if (supply == 0) return;
@@ -223,9 +232,7 @@ contract Collateral is ICollateral, PoolToken {
             balBefore[i] = IERC20(tokens[i]).balanceOf(address(this));
         }
 
-        try IStratusVaultRewards(underlying).claimRewards() {} catch {
-            return;
-        }
+        IStratusVaultRewards(underlying).claimRewards();
 
         for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];

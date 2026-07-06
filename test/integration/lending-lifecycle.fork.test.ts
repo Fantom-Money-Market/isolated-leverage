@@ -213,14 +213,15 @@ describe("full lending lifecycle (Thick ALPT collateral, Sonic fork)", () => {
 describe("lending against a Beets adapter (BPT collateral, Sonic fork)", () => {
   const BEETS_VAULT = "0xbA1333333333a1BA1108E8412f11850A5C319bA9";
   const BPT = "0x75b000584a7d86fb3ef5e15ba26f4c52b41be0e9"; // stS-wS
-  const BPT_HOLDER = "0xaE647ea922D392cC825c51967382940A30893f6D";
+  const GAUGE = "0xaE647ea922D392cC825c51967382940A30893f6D"; // stS-wS gauge (BPT custody)
+  const BPT_HOLDER = GAUGE;
 
   it("wraps BPT as collateral and borrows against it", async () => {
     const [deployer, lender, borrower] = await ethers.getSigners();
 
     // adapter (token0 = wS, token1 = stS)
     const adapter = await (await ethers.getContractFactory("StratusBeetsV3Adapter")).deploy(
-      BEETS_VAULT, BPT, "Stratus Beets stS-wS", "s-stS-wS"
+      BEETS_VAULT, BPT, GAUGE, "Stratus Beets stS-wS", "s-stS-wS"
     );
     await adapter.waitForDeployment();
     const adapterAddr = await adapter.getAddress();

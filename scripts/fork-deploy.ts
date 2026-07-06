@@ -68,6 +68,10 @@ async function main() {
   const vault = await ethers.getContractAt("StratusShadowVault", vaultAddr);
   console.log("vault  :", vaultAddr);
 
+  // 5% spot/TWAP cap, 0.1% surplus fallback bounty, 2% gauge bounty, 60% min skew.
+  await (await factory.setVaultRebalanceParams(vaultAddr, 500, 10, 200, 6000)).wait();
+  console.log("rebalance params set (minSkew 60%)");
+
   // --- Tarot lending pool on top of the ALPT ---
   const BD = await (await ethers.getContractFactory("BDeployer", deployer)).deploy();
   await BD.waitForDeployment();
