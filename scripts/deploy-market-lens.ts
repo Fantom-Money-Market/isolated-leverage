@@ -12,8 +12,10 @@ async function main() {
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
   const beetsCfgPath = path.join(__dirname, "..", "fork-ui", "beets-config.json");
   const beetsCfg = fs.existsSync(beetsCfgPath) ? JSON.parse(fs.readFileSync(beetsCfgPath, "utf8")) : null;
+  const dlmmCfgPath = path.join(__dirname, "..", "fork-ui", "dlmm-config.json");
+  const dlmmCfg = fs.existsSync(dlmmCfgPath) ? JSON.parse(fs.readFileSync(dlmmCfgPath, "utf8")) : null;
 
-  const factories = [cfg.tarotFactory, beetsCfg?.tarotFactory].filter(Boolean);
+  const factories = [cfg.tarotFactory, beetsCfg?.tarotFactory, dlmmCfg?.tarotFactory].filter(Boolean);
   console.log("registering factories:", factories);
 
   const lens = await (await ethers.getContractFactory("MarketLens", deployer)).deploy(factories);

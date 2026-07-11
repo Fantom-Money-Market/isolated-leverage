@@ -33,6 +33,9 @@ interface ILensAlpt {
     function balanceOf(address) external view returns (uint256);
     function pendingReward(address user, address token) external view returns (uint256);
     function rewardTokensList() external view returns (address[] memory);
+    // DLMM-only (StratusDLMMVault): binStep() is the feature-probe marker, pair() the venue pool.
+    function binStep() external view returns (uint16);
+    function pair() external view returns (address);
 }
 
 interface ILensBorrowable {
@@ -317,10 +320,10 @@ contract MarketLens {
         p.walletAlpt = v.balanceOf(user);
     }
 
-    /// @dev Feature-probe the underlying to classify the venue. An explicit override wins
-    ///      (the only way to mark DLMM until those adapters exist). Detection order:
-    ///      bpt() → Beets/Balancer adapter; gauge() nonzero + pool() → gauged CL (Shadow);
-    ///      pool() only → fee-only CL (Thick).
+    /// @dev Feature-probe the underlying to classify the venue. An explicit override wins.
+    ///      Detection order: bpt() → Beets/Balancer adapter; binStep() → DLMM (Metropolis
+    ///      Liquidity Book); gauge() nonzero + pool() → gauged CL (Shadow); pool() only →
+    ///      fee-only CL (Thick).
     function _detectVenue(address alpt)
         internal
         view
@@ -334,6 +337,14 @@ contract MarketLens {
                 venueGauge = g;
             } catch {}
             kind = forced != VenueKind.UNKNOWN ? forced : VenueKind.BEETS_V3;
+            return (kind, venuePool, venueGauge);
+        } catch {}
+
+        try ILensAlpt(alpt).binStep() returns (uint16) {
+            try ILensAlpt(alpt).pair() returns (address p) {
+                venuePool = p;
+            } catch {}
+            kind = forced != VenueKind.UNKNOWN ? forced : VenueKind.DLMM;
             return (kind, venuePool, venueGauge);
         } catch {}
 
