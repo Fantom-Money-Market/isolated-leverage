@@ -123,6 +123,14 @@ contract DLMMRebalanceCycleTest is Test {
         _assertActiveBinLiquidity("after initial createVault deployIdle");
     }
 
+    function test_rewardBountyBpsDefaultAndSetter() public {
+        assertEq(vault.rewardBountyBps(), 200);
+        factory.setVaultRewardBountyBps(address(vault), 500);
+        assertEq(vault.rewardBountyBps(), 500);
+        vm.expectRevert(); // BadBountyBps — > 3000
+        factory.setVaultRewardBountyBps(address(vault), 3001);
+    }
+
     function _assertActiveBinLiquidity(string memory where) internal view {
         uint24 activeId = ILBPair(PAIR).getActiveId();
         uint256 bal = ILBPair(PAIR).balanceOf(address(vault), activeId);

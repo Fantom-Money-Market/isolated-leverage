@@ -15,6 +15,8 @@ interface IStratusDLMMVault {
 
     function updateProtocolFee(uint8 newFee) external;
 
+    function setRewardBountyBps(uint256 rewardBountyBps) external;
+
     function panicAtTheDisco() external;
 
     function resume() external;

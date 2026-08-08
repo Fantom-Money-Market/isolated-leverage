@@ -329,11 +329,26 @@ contract Collateral is ICollateral, PoolToken {
         super._transfer(from, to, value);
     }
 
+    /// @dev borrowBalance() is a view over each Borrowable's LAST-accrued borrowIndex, so
+    ///      any solvency check that reads it without accruing first understates debt by the
+    ///      interest owed since that market was last touched. Borrowable.borrow() carries an
+    ///      `accrue` modifier for ITSELF only, which leaves the opposite leg stale on every
+    ///      two-sided position — enough to pass a health check that current debt would fail,
+    ///      then remove collateral or borrow again before anyone refreshes it.
+    ///      accrueInterest() is unguarded and no-ops when already accrued this timestamp
+    ///      (BInterestModel), so this is safe to call from inside a Borrowable's own
+    ///      nonReentrant borrow()/liquidate() and costs nothing when already current.
+    function _accrueBothBorrowables() internal {
+        IBorrowable(borrowable0).accrueInterest();
+        IBorrowable(borrowable1).accrueInterest();
+    }
+
     function tokensUnlocked(address from, uint256 value) public returns (bool) {
         uint256 _balance = balanceOf[from];
         if (value > _balance) return false;
         uint256 finalBalance = _balance - value;
         uint256 amountCollateral = (finalBalance * exchangeRate()) / 1e18;
+        _accrueBothBorrowables();
         uint256 amount0 = IBorrowable(borrowable0).borrowBalance(from);
         uint256 amount1 = IBorrowable(borrowable1).borrowBalance(from);
         (, uint256 shortfall) = _calculateLiquidity(amountCollateral, amount0, amount1);
@@ -347,6 +362,11 @@ contract Collateral is ICollateral, PoolToken {
         uint256 amount0,
         uint256 amount1
     ) public returns (uint256 liquidity, uint256 shortfall) {
+        // Refresh both markets before reading either leg — see _accrueBothBorrowables.
+        // Covers canBorrow() (whose non-invoked leg would otherwise be stale) and seize().
+        if (amount0 == type(uint256).max || amount1 == type(uint256).max) {
+            _accrueBothBorrowables();
+        }
         if (amount0 == type(uint256).max)
             amount0 = IBorrowable(borrowable0).borrowBalance(borrower);
         if (amount1 == type(uint256).max)

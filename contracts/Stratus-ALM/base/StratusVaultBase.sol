@@ -153,6 +153,20 @@ abstract contract StratusVaultBase is ERC20, ReentrancyGuard {
 
     // ===================== DEPOSIT / WITHDRAW =====================
 
+    /// @dev ERC4626 virtual-shares math for one (totals, price) basis. First deposit and
+    ///      inflation are handled uniformly — no special-casing, no MINIMUM_LIQUIDITY mint.
+    function _sharesFor(
+        uint256 deposit0,
+        uint256 deposit1,
+        uint256 total0,
+        uint256 total1,
+        uint256 price
+    ) internal view returns (uint256) {
+        uint256 depositValue1 = deposit1 + Math.mulDiv(deposit0, price, PRECISION);
+        uint256 totalValue1 = total1 + Math.mulDiv(total0, price, PRECISION);
+        return Math.mulDiv(depositValue1, totalSupply() + VIRTUAL_SHARES, totalValue1 + VIRTUAL_ASSETS);
+    }
+
     /// @notice Deposit token0/token1, receive ALPT shares. Tokens sit as idle balance
     ///         until the next rebalance deploys them (Gamma model).
     function deposit(uint256 deposit0, uint256 deposit1, address to, uint256 minShares)
@@ -166,15 +180,35 @@ abstract contract StratusVaultBase is ERC20, ReentrancyGuard {
 
         _realizeFees();
 
-        // Value the deposit and the vault at the safe (manipulation-resistant) price,
-        // before pulling the deposit in.
-        (uint256 t0, uint256 t1, uint256 price) = _safeValuation();
-        uint256 depositValue1 = deposit1 + Math.mulDiv(deposit0, price, PRECISION);
-        uint256 totalValue = t1 + Math.mulDiv(t0, price, PRECISION);
+        // Entry is priced at the SAFE price, but withdraw() pays out a pro-rata slice of the
+        // LIVE basket. Those are different bases, and whenever safe and spot diverge a
+        // one-sided deposit of whichever asset the safe price over-values mints more shares
+        // than the live basket backs — deposit, redeem immediately, and the difference comes
+        // out of existing holders. Pro-rata exit is the right (unmanipulable) primitive, so
+        // the fix belongs on entry: price the deposit BOTH ways and mint the lesser.
+        //
+        // Which price flatters the depositor depends on the deposit's mix versus the vault's:
+        // shares grow with price for a token0-heavy deposit and shrink for a token1-heavy
+        // one, so no single price is conservative for both. Taking the minimum is, for any
+        // mix and either direction of divergence, which removes the round-trip profit
+        // entirely. Manipulating spot can only ever reduce the attacker's own share count;
+        // an honest depositor is protected by minShares.
+        (uint256 pt0, uint256 pt1) = _totalAmountsSpot();
+        uint256 sharesSpot = _sharesFor(deposit0, deposit1, pt0, pt1, _spotPrice());
 
-        // ERC4626 virtual-shares math — first deposit and inflation handled uniformly,
-        // no special-casing and no MINIMUM_LIQUIDITY mint.
-        shares = Math.mulDiv(depositValue1, totalSupply() + VIRTUAL_SHARES, totalValue + VIRTUAL_ASSETS);
+        if (totalSupply() == 0) {
+            // Bootstrap: there are no existing holders to dilute and no ALPT posted as
+            // collateral anywhere, so the safe-price leg protects nobody — while a venue
+            // whose oracle was only just activated (DLMM) genuinely cannot produce one for
+            // its first TWAP window. Requiring it here would make a fresh vault
+            // un-seedable. Manipulating spot on an empty vault only changes the seeder's
+            // own share count.
+            shares = sharesSpot;
+        } else {
+            (uint256 st0, uint256 st1, uint256 safePrice) = _safeValuation();
+            uint256 sharesSafe = _sharesFor(deposit0, deposit1, st0, st1, safePrice);
+            shares = sharesSafe < sharesSpot ? sharesSafe : sharesSpot;
+        }
         if (shares == 0 || shares < minShares) revert Slippage();
 
         if (deposit0 > 0) token0.safeTransferFrom(msg.sender, address(this), deposit0);

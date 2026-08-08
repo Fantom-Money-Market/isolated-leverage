@@ -17,6 +17,7 @@ interface IUnwindBorrowable {
     function borrow(address borrower, address receiver, uint256 borrowAmount, bytes calldata data) external;
     function borrowBalance(address borrower) external view returns (uint256);
     function exchangeRate() external returns (uint256); // accrue-modified: syncs interest
+    function underlying() external view returns (address);
 }
 
 interface IUnwindCollateral {
@@ -109,6 +110,34 @@ contract UnwindRouter is ITarotCallee {
         IERC20(ctx.collateral).safeTransferFrom(ctx.borrower, ctx.collateral, ctx.cTokenAmount);
     }
 
+    /// @notice Atomic repay: pull up to `amount` of the borrowable's underlying from the
+    ///         caller and apply it to THEIR debt in the same transaction.
+    /// @dev Repayment on a Borrowable is expressed as borrow(borrower, _, 0, "") — the
+    ///      contract credits its whole unaccounted balance delta to whoever is named as
+    ///      `borrower`, and a zero borrow amount consumes no borrow allowance. Split across
+    ///      two transactions that lets anyone call borrow(themselves, address(0), 0, "")
+    ///      in between and have the pending payment retire their own debt instead.
+    /// @param amount Maximum to repay; the actual repayment is capped at the caller's live
+    ///        debt so an overpayment can't be stranded as unattributed pool value.
+    /// @return repaid Underlying actually pulled and applied.
+    function repay(address borrowable, uint256 amount) external returns (uint256 repaid) {
+        if (expectedCaller != address(0)) revert Unauthorized();
+        if (amount == 0) revert NothingToDo();
+
+        address token = IUnwindBorrowable(borrowable).underlying();
+        if (token == address(0)) revert BadCollateral();
+
+        // borrowBalance() reads the last-accrued index; poke first so the cap reflects
+        // interest owed right now (same reason as _repayAndRefund below).
+        IUnwindBorrowable(borrowable).exchangeRate();
+        uint256 debt = IUnwindBorrowable(borrowable).borrowBalance(msg.sender);
+        repaid = amount < debt ? amount : debt;
+        if (repaid == 0) revert NothingToDo();
+
+        IERC20(token).safeTransferFrom(msg.sender, borrowable, repaid);
+        IUnwindBorrowable(borrowable).borrow(msg.sender, address(0), 0, "");
+    }
+
     /// @inheritdoc ITarotCallee
     function tarotBorrow(address, address, uint256, bytes calldata) external pure {
         revert Unauthorized();
@@ -129,12 +158,12 @@ contract UnwindRouter is ITarotCallee {
         // same exchangeRate() poke before its repay for exactly this reason.)
         IUnwindBorrowable(borrowable).exchangeRate();
         uint256 debt = IUnwindBorrowable(borrowable).borrowBalance(borrower);
-        uint256 repay = amountMax < debt ? amountMax : debt;
-        if (repay > 0) {
-            IERC20(token).safeTransfer(borrowable, repay);
+        uint256 repayAmount = amountMax < debt ? amountMax : debt;
+        if (repayAmount > 0) {
+            IERC20(token).safeTransfer(borrowable, repayAmount);
             IUnwindBorrowable(borrowable).borrow(borrower, address(0), 0, "");
         }
-        uint256 refund = amountMax - repay;
+        uint256 refund = amountMax - repayAmount;
         if (refund > 0) {
             IERC20(token).safeTransfer(borrower, refund);
         }

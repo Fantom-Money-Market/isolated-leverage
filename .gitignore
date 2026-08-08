@@ -132,3 +132,6 @@ logs/
 !SECURITY.md
 !CONTRIBUTING.md
 !docs/**/*.md
+
+# Third-party verified sources — regenerate with scripts/fetch-verified-sources.mjs
+external-sources/

@@ -41,6 +41,10 @@ interface ILBPair {
         view
         returns (uint64 cumulativeId, uint64 cumulativeVolatility, uint64 cumulativeBinCrossed);
 
+    /// @notice Activate (when never used) and/or grow the pair's oracle ring buffer.
+    ///         Permissionless. Reverts if `newLength` is not larger than the current size.
+    function increaseOracleLength(uint16 newLength) external;
+
     /// @notice Add liquidity across the bins encoded in `liquidityConfigs`. Caller must
     ///         have already transferred tokenX/tokenY to this pair (no pull/callback —
     ///         unlike Uniswap V3, LB expects payment up front).

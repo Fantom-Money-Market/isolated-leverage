@@ -101,6 +101,12 @@ contract MarketLens {
         TokenMeta token0;
         TokenMeta token1;
         // valuation (manipulation-resistant surface)
+        /// @dev When false, the venue cannot currently produce a manipulation-resistant
+        ///      price and the three valuation fields below are zero. That is a genuine
+        ///      market state (e.g. a DLMM pair whose LB oracle has gone stale), not a lens
+        ///      error — borrowing and liquidation are paused until it clears. Consumers
+        ///      should render "unavailable" rather than treating the zeros as real values.
+        bool priceAvailable;
         uint256 totalValueSafe; // token1 base units
         uint256 twapPrice; // token0 in token1, 1e18
         uint256 pricePerShareSafe;
@@ -286,9 +292,18 @@ contract MarketLens {
         m.token0 = _tokenMeta(v.token0());
         m.token1 = _tokenMeta(v.token1());
 
-        m.totalValueSafe = v.getTotalValueSafe();
-        m.twapPrice = v.twapPrice();
-        m.pricePerShareSafe = v.pricePerShareSafe();
+        // The safe-valuation surface is allowed to REVERT (StratusDLMMVaultBase.UnsafePrice)
+        // when a venue can't currently produce a manipulation-resistant price. That must not
+        // take the whole enumeration down with it — one paused market would otherwise blank
+        // the entire market list for every consumer. Report it as unpriced instead.
+        try v.getTotalValueSafe() returns (uint256 value) {
+            m.totalValueSafe = value;
+            m.twapPrice = v.twapPrice();
+            m.pricePerShareSafe = v.pricePerShareSafe();
+            m.priceAvailable = true;
+        } catch {
+            m.priceAvailable = false;
+        }
         m.alptTotalSupply = v.totalSupply();
 
         m.cash0 = ILensBorrowable(ref.borrowable0).totalBalance();
@@ -312,7 +327,17 @@ contract MarketLens {
         p.borrowBalance0 = ILensBorrowable(ref.borrowable0).borrowBalance(user);
         p.borrowBalance1 = ILensBorrowable(ref.borrowable1).borrowBalance(user);
         if (p.cTokenBalance > 0 || p.borrowBalance0 > 0 || p.borrowBalance1 > 0) {
-            (p.liquidity, p.shortfall) = ILensCollateral(ref.collateral).accountLiquidity(user);
+            // accountLiquidity routes through Collateral.getPrices, which now propagates a
+            // venue's UnsafePrice revert. Leave liquidity/shortfall at zero for that market
+            // rather than failing every position the user holds; the paired market entry
+            // from getAllMarkets carries priceAvailable == false so the UI can say why.
+            try ILensCollateral(ref.collateral).accountLiquidity(user) returns (
+                uint256 liquidity,
+                uint256 shortfall
+            ) {
+                p.liquidity = liquidity;
+                p.shortfall = shortfall;
+            } catch {}
         }
         ILensAlpt v = ILensAlpt(alpt);
         p.wallet0 = ILensErc20(v.token0()).balanceOf(user);

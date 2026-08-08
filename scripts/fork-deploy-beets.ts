@@ -86,17 +86,35 @@ async function main() {
   await new ethers.Contract(wS, ERC20, lender).transfer(lp.borrowable0, LEND_WS);
   await (await ethers.getContractAt("Borrowable", lp.borrowable0, lender)).mint(lender.address);
 
-  // Source stS WITHOUT touching the v3 vault's reserves: deposit wS one-sided through
-  // the adapter, then withdraw proportionally — the exit pays out in the pool's mix
-  // (~75% stS by amount), all through legitimate vault accounting.
-  const STS_CONVERT_WS = ethers.parseEther("160");
-  await fundFromAccount(WS_POOL, wS, lender.address, STS_CONVERT_WS);
-  await (await new ethers.Contract(wS, ERC20, lender).approve(adapterAddr, STS_CONVERT_WS)).wait();
+  // Source stS WITHOUT touching the v3 vault's reserves: deposit wS one-sided through the
+  // adapter, then withdraw proportionally — the exit pays out in the pool's mix, all
+  // through legitimate vault accounting. How much stS a given wS input yields tracks the
+  // pool's LIVE composition, so a hardcoded input silently goes short whenever the pool
+  // drifts (it did). Measure the observed yield and top up from it instead.
   const adapterAsLender = adapter.connect(lender) as typeof adapter;
-  await (await adapterAsLender.deposit(STS_CONVERT_WS, 0, lender.address, 0)).wait();
-  const convShares = await adapter.balanceOf(lender.address);
-  await (await adapterAsLender.withdraw(convShares, lender.address, 0, 0)).wait();
-  const stSGot = await new ethers.Contract(stS, ERC20, lender).balanceOf(lender.address);
+  const stSToken = new ethers.Contract(stS, ERC20, lender);
+
+  async function roundTripWsForSts(wsAmount: bigint) {
+    await fundFromAccount(WS_POOL, wS, lender.address, wsAmount);
+    await (await new ethers.Contract(wS, ERC20, lender).approve(adapterAddr, wsAmount)).wait();
+    await (await adapterAsLender.deposit(wsAmount, 0, lender.address, 0)).wait();
+    const shares = await adapter.balanceOf(lender.address);
+    await (await adapterAsLender.withdraw(shares, lender.address, 0, 0)).wait();
+  }
+
+  let stSGot: bigint = await stSToken.balanceOf(lender.address);
+  let nextWs = ethers.parseEther("160");
+  for (let attempt = 0; stSGot < LEND_STS && attempt < 5; attempt++) {
+    const before = stSGot;
+    await roundTripWsForSts(nextWs);
+    stSGot = await stSToken.balanceOf(lender.address);
+    const gained = stSGot - before;
+    if (stSGot >= LEND_STS) break;
+    const shortfall = LEND_STS - stSGot;
+    // Size the next pass off the rate we just measured, +25% margin. If a pass somehow
+    // yielded nothing, fall back to doubling rather than dividing by zero.
+    nextWs = gained > 0n ? ((nextWs * shortfall) / gained) * 5n / 4n : nextWs * 2n;
+  }
   console.log("stS sourced via adapter round-trip:", ethers.formatEther(stSGot));
   if (stSGot < LEND_STS) throw new Error(`stS conversion came up short: ${ethers.formatEther(stSGot)} < ${ethers.formatEther(LEND_STS)}`);
 

@@ -28,9 +28,10 @@ import "../libraries/LiquidityBookMath.sol";
 ///      That means deploying idle balances into the bin window wastes nothing regardless
 ///      of the token0:token1 ratio on hand (each side deploys independently into its own
 ///      bins) — DLMM has none of CL's "one-sided imbalance stays idle" problem, so there
-///      is no swap-funded rebalance here. The only real rebalancing need is RECENTERING
-///      the bin window as the active bin drifts, which deployIdle()/rebalance() both do
-///      in full (burn old window, recenter, redeploy 100% of whatever's on hand).
+///      is no swap-funded rebalance here. The only rebalancing need is RECENTERING the
+///      bin window as the active/rewarded range drifts. Permissionless rebalance() tips
+///      the caller a cut of freshly-harvested METRO (rewardBountyBps), mirroring Shadow's
+///      gauge bounty — yield-funded, not a principal bleed.
 /// @dev Active-bin minting: LB accepts any X:Y into the active bin and trims to the live
 ///      reserve ratio (refunding leftovers). Off-ratio deposits cost composition fees, they
 ///      do NOT cause PackedUint128Math__SubUnderflow. The vault mints the active bin in a
@@ -54,6 +55,10 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
     ///      depth, purely for fee income — they earn no hook emissions but still take
     ///      swap flow as price moves through them before the next recenter.
     uint256 internal constant OUTER_BINS_EACH_SIDE = 5;
+    /// @dev How stale the newest oracle sample may be before the TWAP is rejected. Caps the
+    ///      extrapolated (activeId-derived, therefore manipulable) share of the averaging
+    ///      window at 1/3 — see _trySafePrice for why extrapolation is the real risk.
+    uint40 internal constant MAX_ORACLE_STALENESS = uint40(TWAP_PERIOD) / 3;
     /// @dev Share of deploy weight concentrated into the rewarded range (or, with no hook,
     ///      the single active bin) — the rest spreads evenly across the outer depth bins.
     uint256 internal constant REWARDED_WEIGHT_BPS = 5000;
@@ -66,12 +71,23 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
     ///         recovery back to the same level look like fresh "growth" and get taxed again.
     uint256 public lastValueCheckpoint;
 
+    /// @notice Cut (bps) of freshly-harvested hook emissions paid to the permissionless
+    ///         rebalancer — from yield, not principal. Same idea as CL's rewardBountyBps.
+    ///         Factory deployIdle pays 0; only rebalance() tips the caller.
+    uint256 public rewardBountyBps = 200; // 2% of the harvest
+
     event Rebalance(uint24 activeId, uint256 total0, uint256 total1);
     event HookRewardsHarvested(address indexed token, uint256 grossAmount, uint256 protocolFeeAmount);
+    event RebalanceBountyPaid(address indexed to, address indexed token, uint256 amount);
     event ProtocolFeeMinted(uint256 shares, uint256 valueGrowth);
     event HookRefreshed(address indexed hook);
+    event RewardBountyBpsUpdated(uint256 rewardBountyBps);
 
     error NotDrifted();
+    /// @notice The LB oracle cannot currently produce a manipulation-resistant price, so the
+    ///         vault refuses to report a "safe" valuation rather than falling back to spot.
+    error UnsafePrice();
+    error BadBountyBps();
 
     constructor(
         address _factory,
@@ -94,6 +110,7 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
         pair = ILBPair(_pair);
         binStep = ILBPair(_pair).getBinStep();
         hook = ILBHooksRewarder(LiquidityBookMath.getHooksAddress(ILBPair(_pair).getLBHooksParameters()));
+
         _recenterBins();
     }
 
@@ -113,12 +130,20 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
         return binIds;
     }
 
+    /// @notice Set the METRO cut paid to permissionless rebalancers (factory only).
+    /// @dev Cap matches CL vaults (30% of a single harvest).
+    function setRewardBountyBps(uint256 _rewardBountyBps) external onlyFactory {
+        if (_rewardBountyBps > 3000) revert BadBountyBps();
+        rewardBountyBps = _rewardBountyBps;
+        emit RewardBountyBpsUpdated(_rewardBountyBps);
+    }
+
     // ===================== VENUE-HOOK IMPLEMENTATIONS =====================
 
     /// @inheritdoc StratusVaultBase
     function _safeValuation() internal view override returns (uint256 total0, uint256 total1, uint256 price) {
         (total0, total1) = _totalAmountsAtCurrent();
-        price = _twapPriceOrSpot();
+        price = _safePrice();
     }
 
     /// @inheritdoc StratusVaultBase
@@ -149,30 +174,65 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
         total1 += token1.balanceOf(address(this));
     }
 
-    /// @dev LB's built-in oracle (v2.1+) needs two cumulative-id samples to average, exactly
-    ///      like Uniswap V3's observe(). Falls back to spot if the pair has no/insufficient
-    ///      history yet (fresh pair, or a low-activity one) — same bootstrapping limitation
-    ///      a freshly-seeded CL vault has before its own TWAP window fills in.
-    function _twapPriceOrSpot() internal view returns (uint256) {
-        (, , uint16 activeSize, , uint40 firstTimestamp) = pair.getOracleParameters();
-        if (activeSize == 0) return _spotPrice();
+    /// @notice True when the LB oracle can currently serve a manipulation-resistant price.
+    ///         Lets callers (lens/UI) see that the market is unpriceable without reverting.
+    function isSafePriceAvailable() public view returns (bool) {
+        (bool ok, ) = _trySafePrice();
+        return ok;
+    }
+
+    /// @dev Manipulation-resistant price, or a revert. This used to silently return SPOT —
+    ///      `_spotPrice()` is `getPriceFromId(getActiveId())`, i.e. the swap-movable active
+    ///      bin — on five separate conditions, while `Collateral` consumed the result as a
+    ///      "safe" collateral price with no way to tell the modes apart. Borrowing against a
+    ///      price the borrower can move is the whole attack; failing closed is correct here,
+    ///      even though it means the market pauses while the oracle is unusable.
+    ///
+    /// @dev The staleness bound is the subtle part. LBPair.getOracleSampleAt EXTRAPOLATES
+    ///      the tail past the newest stored sample using the CURRENT activeId
+    ///      (`cumulativeId += activeId * deltaTime`). On a pair that has not traded within
+    ///      the window, BOTH endpoints extrapolate from the same stored sample, the shared
+    ///      term cancels, and the "average" reduces to exactly the current activeId — a
+    ///      working oracle that silently reports spot. So requiring an ACTIVE oracle with
+    ///      enough history is not sufficient; the newest sample must also be recent enough
+    ///      that extrapolation covers only a small slice of the window.
+    function _trySafePrice() internal view returns (bool ok, uint256 price) {
+        (, , uint16 activeSize, uint40 lastUpdated, uint40 firstTimestamp) = pair.getOracleParameters();
+        if (activeSize == 0) return (false, 0); // oracle never activated
         uint40 nowTs = uint40(block.timestamp);
-        if (nowTs < firstTimestamp + uint40(TWAP_PERIOD)) return _spotPrice();
+        if (nowTs < firstTimestamp + uint40(TWAP_PERIOD)) return (false, 0); // too little history
+        if (lastUpdated == 0 || nowTs - lastUpdated > MAX_ORACLE_STALENESS) return (false, 0);
 
         try pair.getOracleSampleAt(nowTs) returns (uint64 cumNow, uint64, uint64) {
             try pair.getOracleSampleAt(nowTs - uint40(TWAP_PERIOD)) returns (uint64 cumPast, uint64, uint64) {
-                if (cumNow <= cumPast) return _spotPrice();
+                if (cumNow <= cumPast) return (false, 0);
                 uint24 avgId = uint24((uint256(cumNow) - uint256(cumPast)) / TWAP_PERIOD);
-                return LiquidityBookMath.getPriceFromId(avgId, binStep);
+                return (true, LiquidityBookMath.getPriceFromId(avgId, binStep));
             } catch {
-                return _spotPrice();
+                return (false, 0);
             }
         } catch {
-            return _spotPrice();
+            return (false, 0);
         }
     }
 
+    function _safePrice() internal view returns (uint256) {
+        (bool ok, uint256 price) = _trySafePrice();
+        if (!ok) revert UnsafePrice();
+        return price;
+    }
+
     function _mintPerformanceFee() internal {
+        // No holders yet means no growth to tax and nothing to checkpoint.
+        if (totalSupply() == 0) return;
+        // The performance fee is protocol revenue, not a safety control, so it must never be
+        // the reason a user action reverts. getTotalValueSafe() now fails closed whenever the
+        // LB oracle can't produce a manipulation-resistant price (including the first TWAP
+        // window after a pair's oracle is switched on), and _realizeFees runs on the
+        // deposit/withdraw/rebalance paths — so skip the fee and leave the checkpoint
+        // untouched rather than trapping withdrawals. The cut is simply taken later, off the
+        // same ratcheting checkpoint, once a safe valuation exists again.
+        if (!isSafePriceAvailable()) return;
         uint256 currentValue = getTotalValueSafe();
         if (currentValue > lastValueCheckpoint && protocolFee > 0 && totalSupply() > 0) {
             uint256 growth = currentValue - lastValueCheckpoint;
@@ -187,21 +247,22 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
     }
 
     /// @notice Harvest the hook's METRO (or whatever emission) for our rewarded-range bins,
-    ///         skim the protocol cut, distribute the rest, and mint the factory a dilutive
-    ///         performance-fee share of any value growth since the last checkpoint. Fees
-    ///         auto-compound directly into bin reserves here (no explicit collect() the way
-    ///         CL pools have), so the checkpoint-based mint is the only way to realize a cut.
+    ///         skim the protocol cut, distribute the rest. Fees auto-compound into bin
+    ///         reserves here (no explicit collect() the way CL pools have), so the
+    ///         checkpoint-based performance-fee mint is the only way to realize a cut of that.
     function _realizeFees() internal override {
-        _harvestHookRewards();
+        _harvestHookRewards(address(0), 0);
         _mintPerformanceFee();
     }
 
-    function _harvestHookRewards() internal {
-        if (address(hook) == address(0)) return;
+    /// @dev Claim hook emissions for rewarded-range bins. Optionally skim `cutBps` to
+    ///      `bountyTo` (permissionless rebalancer tip), then protocol fee, then distribute.
+    function _harvestHookRewards(address bountyTo, uint256 cutBps) internal returns (bool paidBounty) {
+        if (address(hook) == address(0)) return false;
         try hook.isStopped() returns (bool stopped) {
-            if (stopped) return;
+            if (stopped) return false;
         } catch {
-            return;
+            return false;
         }
 
         (uint256 rStart, uint256 rEnd) = (rewardedBinStart, rewardedBinEnd);
@@ -214,7 +275,7 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
                 qualifying[qCount++] = id;
             }
         }
-        if (qCount == 0) return;
+        if (qCount == 0) return false;
         assembly {
             mstore(qualifying, qCount)
         }
@@ -222,14 +283,22 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
         address rewardToken = hook.getRewardToken();
         uint256 balBefore = IERC20(rewardToken).balanceOf(address(this));
         try hook.claim(address(this), qualifying) {} catch {
-            return;
+            return false;
         }
         uint256 received = IERC20(rewardToken).balanceOf(address(this)) - balBefore;
-        if (received == 0) return;
+        if (received == 0) return false;
 
-        uint256 fee = Math.mulDiv(received, protocolFee, 100);
+        uint256 bounty = (bountyTo != address(0) && cutBps > 0) ? Math.mulDiv(received, cutBps, BASIS_POINTS) : 0;
+        if (bounty > 0) {
+            IERC20(rewardToken).safeTransfer(bountyTo, bounty);
+            paidBounty = true;
+            emit RebalanceBountyPaid(bountyTo, rewardToken, bounty);
+        }
+
+        uint256 rest = received - bounty;
+        uint256 fee = Math.mulDiv(rest, protocolFee, 100);
         if (fee > 0) IERC20(rewardToken).safeTransfer(factory, fee);
-        uint256 net = received - fee;
+        uint256 net = rest - fee;
         _distributeReward(rewardToken, net);
         emit HookRewardsHarvested(rewardToken, received, fee);
     }
@@ -272,26 +341,26 @@ abstract contract StratusDLMMVaultBase is StratusVaultBase {
 
     /// @notice Recenter the bin window and redeploy 100% of idle balances. Keeper/factory
     ///         only, matching the other venues' deployIdle signature (called once right
-    ///         after factory seeding, and periodically thereafter).
+    ///         after factory seeding, and periodically thereafter). No rebalancer bounty —
+    ///         the factory is not a gas-paid keeper tip path.
     function deployIdle() external override onlyFactory nonReentrant whenNotPaused {
-        _rebalance();
+        _rebalance(address(0), 0);
     }
 
-    /// @notice Permissionless recenter — safe to expose without a keeper because, unlike
-    ///         CL's rebalanceViaSwap, there is no swap/bounty/anti-drain economics needed
-    ///         (see contract-level dev comment): recentering never leaves genuine value
-    ///         idle, so there's nothing for a caller to drain. Reverts if the bin window
-    ///         is already centered on the current rewarded range, to block gas-wasting spam.
+    /// @notice Permissionless recenter. Caller is tipped `rewardBountyBps` of any METRO
+    ///         harvested in this tx (yield-funded, same as Shadow's gauge bounty). Reverts
+    ///         if the bin window is already centered, to block gas-wasting spam.
     function rebalance() external nonReentrant whenNotPaused {
         if (_isCentered()) revert NotDrifted();
-        _rebalance();
+        _rebalance(msg.sender, rewardBountyBps);
     }
 
-    function _rebalance() internal {
-        // Harvest emissions from the bins we're about to burn, but defer the dilutive
-        // performance-fee mint until AFTER redeploy — pre-burn valuation compares idle
-        // LP in bins against a checkpoint taken at the prior idle state and can skew.
-        _harvestHookRewards();
+    function _rebalance(address bountyTo, uint256 cutBps) internal {
+        // Harvest emissions from the bins we're about to burn (optionally tip the caller),
+        // but defer the dilutive performance-fee mint until AFTER redeploy — pre-burn
+        // valuation compares idle LP in bins against a checkpoint taken at the prior idle
+        // state and can skew.
+        _harvestHookRewards(bountyTo, cutBps);
         _burnAll();
         _recenterBins();
         _mintFromIdle();

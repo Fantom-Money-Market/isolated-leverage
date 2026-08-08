@@ -15,7 +15,33 @@ async function main() {
   const dlmmCfgPath = path.join(__dirname, "..", "fork-ui", "dlmm-config.json");
   const dlmmCfg = fs.existsSync(dlmmCfgPath) ? JSON.parse(fs.readFileSync(dlmmCfgPath, "utf8")) : null;
 
-  const factories = [cfg.tarotFactory, beetsCfg?.tarotFactory, dlmmCfg?.tarotFactory].filter(Boolean);
+  const thickCfgPath = path.join(__dirname, "..", "fork-ui", "thick-config.json");
+  const thickCfg = fs.existsSync(thickCfgPath) ? JSON.parse(fs.readFileSync(thickCfgPath, "utf8")) : null;
+
+  const candidates = [
+    cfg.tarotFactory,
+    beetsCfg?.tarotFactory,
+    dlmmCfg?.tarotFactory,
+    thickCfg?.tarotFactory,
+  ].filter(Boolean);
+
+  // Only register addresses that actually behave as a Tarot factory on THIS fork. Config
+  // files outlive the chain, and because deploy addresses are derived from the deployer's
+  // nonce, a stale entry frequently points at a DIFFERENT contract that happens to occupy
+  // the same slot after a redeploy — it has code, so a bytecode check isn't enough.
+  // Registering one makes getAllMarkets revert with no reason string. Probe the exact
+  // call the lens makes instead.
+  const probeAbi = ["function allLendingPoolsLength() view returns (uint256)"];
+  const factories: string[] = [];
+  for (const f of candidates) {
+    try {
+      await new ethers.Contract(f, probeAbi, ethers.provider).allLendingPoolsLength();
+      factories.push(f);
+    } catch {
+      console.log(`skipping ${f} — not a live Tarot factory on this fork`);
+    }
+  }
+  if (factories.length === 0) throw new Error("no live Tarot factories found — deploy a market first");
   console.log("registering factories:", factories);
 
   const lens = await (await ethers.getContractFactory("MarketLens", deployer)).deploy(factories);

@@ -18,6 +18,13 @@ import "./StratusDLMMVaultDeployer.sol";
 contract StratusDLMMVaultFactory is Ownable {
     using SafeERC20 for IERC20;
 
+    /// @notice Oracle ring-buffer length requested on a pair at vault creation, so it can
+    ///         serve the 30-minute TWAP the vault's safe price requires. Set here rather
+    ///         than in the vault because the oracle must be switched on BEFORE the vault
+    ///         exists (history only accrues once active) — and because moving this out of
+    ///         the vault constructor kept StratusDLMMVaultDeployer under the EIP-170 limit.
+    uint16 public constant DESIRED_ORACLE_LENGTH = 20;
+
     /// @notice Metropolis LBFactory — resolves a pair address from (tokenA, tokenB, binStep).
     address public immutable lbFactory;
 
@@ -74,6 +81,20 @@ contract StratusDLMMVaultFactory is Ownable {
         uint256 seed1
     ) external onlyOwner returns (address vault) {
         address pairAddr = _resolvePair(tokenA, tokenB, binStep);
+
+        // Activate/extend the pair's oracle BEFORE the vault exists, so the market has a
+        // shot at a real TWAP. The vault's safe price fails closed (StratusDLMMVaultBase
+        // .UnsafePrice) rather than falling back to the swap-movable active bin, so a pair
+        // whose oracle was never switched on would be permanently unpriceable — and the
+        // history only starts accumulating once it is on. increaseOracleLength is
+        // permissionless and flips the oracle on when unused, but REVERTS if asked to
+        // shrink, hence the size check. Not wrapped in try/catch on purpose: failing here,
+        // loudly, beats shipping a market that can never price its collateral.
+        (, uint16 oracleSize, , , ) = ILBPair(pairAddr).getOracleParameters();
+        if (oracleSize < DESIRED_ORACLE_LENGTH) {
+            ILBPair(pairAddr).increaseOracleLength(DESIRED_ORACLE_LENGTH);
+        }
+
         vault = _create(pairAddr, upwardBias, protocolFee, seed0, seed1);
     }
 
@@ -97,6 +118,11 @@ contract StratusDLMMVaultFactory is Ownable {
 
     function updateVaultProtocolFee(address vault, uint8 newFee) external onlyOwner {
         IStratusDLMMVault(vault).updateProtocolFee(newFee);
+    }
+
+    /// @notice Set the METRO cut (bps) paid to permissionless rebalancers on a vault.
+    function setVaultRewardBountyBps(address vault, uint256 rewardBountyBps) external onlyOwner {
+        IStratusDLMMVault(vault).setRewardBountyBps(rewardBountyBps);
     }
 
     /// @notice Set the default reward token for future vaults.

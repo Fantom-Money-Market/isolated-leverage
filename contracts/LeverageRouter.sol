@@ -15,6 +15,8 @@ interface ILevVault {
 
 interface ILevBorrowable {
     function borrow(address borrower, address receiver, uint256 borrowAmount, bytes calldata data) external;
+    function mint(address minter) external returns (uint256);
+    function underlying() external view returns (address);
 }
 
 interface ILevCollateral {
@@ -97,6 +99,25 @@ contract LeverageRouter is ITarotCallee {
             _mintPosition(vault, collateral, msg.sender, minShares);
         }
         expectedCaller = address(0);
+    }
+
+    /// @notice Atomic lend: pull `amount` of the borrowable's underlying from the caller and
+    ///         mint the lend receipt (bTokens) to them in the SAME transaction.
+    /// @dev Exists because Borrowable.mint() is a Uniswap-V2-style low-level primitive: it
+    ///      credits whoever is named as `minter` with the contract's whole unaccounted
+    ///      balance delta, regardless of who created it. Doing the transfer and the mint in
+    ///      two separate transactions leaves a window in which anyone can call
+    ///      Borrowable.mint(themselves) and take the pending deposit. Callers must approve
+    ///      this router for `amount` rather than transferring directly to the Borrowable.
+    function lend(address borrowable, uint256 amount) external returns (uint256 mintTokens) {
+        if (expectedCaller != address(0)) revert Unauthorized();
+        if (amount == 0) revert NothingToDo();
+
+        address underlying = ILevBorrowable(borrowable).underlying();
+        if (underlying == address(0)) revert BadCollateral();
+
+        IERC20(underlying).safeTransferFrom(msg.sender, borrowable, amount);
+        mintTokens = ILevBorrowable(borrowable).mint(msg.sender);
     }
 
     /// @inheritdoc ITarotCallee

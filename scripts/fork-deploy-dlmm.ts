@@ -21,16 +21,23 @@ const PAIR = "0x361F55337074ae43957204CB30fFBAbbCe4Fb837"; // wS/USSD binStep=10
 // amountsReceived == 0, reverting LBPair__ZeroShares regardless of amounts/distribution
 // math (confirmed via a `forge test -vvvv` trace). Funding from an unrelated pair avoids
 // the round-trip entirely.
-const FUNDING_SOURCE = "0x9e81415250996E5cE50B3E3FD99EE9964Dd53008"; // wS/USSD binStep=20
+// Preferred funding source (wS/USSD binStep=20). Its reserves drift with real mainnet
+// activity, so it is a PREFERENCE, not a constant — resolveFundingSource() below falls
+// back to whichever sibling pair actually holds enough today. Hardcoding it meant the
+// deploy broke the moment this pair's USSD drained below the seed amount.
+const PREFERRED_FUNDING_SOURCE = "0x9e81415250996E5cE50B3E3FD99EE9964Dd53008";
 
-// ALL funding must come from FUNDING_SOURCE (binStep=20), NEVER from PAIR. Pulling tokens
-// out of PAIR leaves ERC20 balance < LB's internal _reserves; the next vault mint() then
-// reverts with PackedUint128Math__SubUnderflow on deployIdle/rebalance. FUNDING_SOURCE has
-// ~5k wS / ~4.9 USSD — keep LEND_USSD small so seed + lend + user fit.
+// ALL funding must come from a source that is NOT PAIR. Pulling tokens out of PAIR leaves
+// its ERC20 balance < LB's internal _reserves; the next vault mint() then reverts with
+// PackedUint128Math__SubUnderflow on deployIdle/rebalance.
 const SEED0 = ethers.parseEther("200"); // wS
-const SEED1 = ethers.parseEther("1"); // USSD
 const LEND_WS = ethers.parseEther("100");
-const LEND_USSD = ethers.parseEther("1");
+const USER_WS = ethers.parseEther("20");
+// USSD ceilings, not fixed amounts. Sibling-pair USSD liquidity is thin and drifts with
+// mainnet, so the actual seed/lend legs are capped to what a source really holds today
+// (see main) — a fixed 1.0 broke the deploy once the pairs drained below it.
+const SEED1_MAX = ethers.parseEther("1");
+const LEND_USSD_MAX = ethers.parseEther("1");
 
 const USER = process.env.USER_ADDR || "0x0190933669d250406efcf18b351b954Ea88D5bfD";
 
@@ -48,8 +55,50 @@ async function fundFromSource(source: string, token: string, to: string, amount:
   await ethers.provider.send("hardhat_stopImpersonatingAccount", [source]);
 }
 
-const fundFromExternal = (token: string, to: string, amount: bigint) =>
-  fundFromSource(FUNDING_SOURCE, token, to, amount);
+/// Pick a whale for `token` that is NOT PAIR and actually holds `needed` today. Candidates
+/// are the preferred pair plus every sibling wS/USSD LB pair, ranked by live balance —
+/// mainnet drift silently emptied the hardcoded source and broke the deploy.
+const fundingSourceCache = new Map<string, string>();
+
+async function resolveFundingSource(token: string, needed: bigint): Promise<string> {
+  const cached = fundingSourceCache.get(token.toLowerCase());
+  if (cached) return cached;
+
+  const lbFactory = new ethers.Contract(
+    LB_FACTORY,
+    ["function getAllLBPairs(address,address) view returns ((uint16,address,bool,bool)[])"],
+    ethers.provider,
+  );
+  const pairs: string[] = (await lbFactory.getAllLBPairs(wS, USSD)).map((p: never[]) => p[1] as string);
+
+  const candidates = [PREFERRED_FUNDING_SOURCE, ...pairs].filter(
+    (a, i, arr) =>
+      a.toLowerCase() !== PAIR.toLowerCase() && arr.findIndex((b) => b.toLowerCase() === a.toLowerCase()) === i,
+  );
+
+  const erc20 = new ethers.Contract(token, ERC20, ethers.provider);
+  let best = "";
+  let bestBal = 0n;
+  for (const c of candidates) {
+    const bal: bigint = await erc20.balanceOf(c);
+    if (bal > bestBal) {
+      bestBal = bal;
+      best = c;
+    }
+  }
+  if (!best || bestBal < needed) {
+    throw new Error(
+      `no funding source holds ${ethers.formatEther(needed)} of ${token} ` +
+        `(best: ${best || "none"} with ${ethers.formatEther(bestBal)})`,
+    );
+  }
+  console.log(`funding ${token === wS ? "wS" : "USSD"} from ${best} (holds ${ethers.formatEther(bestBal)})`);
+  fundingSourceCache.set(token.toLowerCase(), best);
+  return best;
+}
+
+const fundFromExternal = async (token: string, to: string, amount: bigint) =>
+  fundFromSource(await resolveFundingSource(token, amount), token, to, amount);
 
 async function main() {
   const [deployer, lender] = await ethers.getSigners();
@@ -61,12 +110,25 @@ async function main() {
   await factory.waitForDeployment();
   console.log("factory:", await factory.getAddress());
 
+  // Budget the USSD legs against live availability (40% each, leaving headroom) rather
+  // than assuming a fixed amount exists.
+  const ussdSource = await resolveFundingSource(USSD, 0n);
+  const ussdAvail: bigint = await new ethers.Contract(USSD, ERC20, ethers.provider).balanceOf(ussdSource);
+  const cap = (want: bigint) => {
+    const share = (ussdAvail * 40n) / 100n;
+    return want < share ? want : share;
+  };
+  const seed1 = cap(SEED1_MAX);
+  const lendUssd = cap(LEND_USSD_MAX);
+  if (seed1 === 0n) throw new Error("no USSD liquidity available to seed the vault");
+  console.log("USSD budget — seed:", ethers.formatEther(seed1), "lend:", ethers.formatEther(lendUssd));
+
   // --- seed + create vault (auto-resolves the hook from the pair) ---
   await fundFromExternal(wS, deployer.address, SEED0);
-  await fundFromExternal(USSD, deployer.address, SEED1);
+  await fundFromExternal(USSD, deployer.address, seed1);
   await new ethers.Contract(wS, ERC20, deployer).approve(await factory.getAddress(), SEED0);
-  await new ethers.Contract(USSD, ERC20, deployer).approve(await factory.getAddress(), SEED1);
-  await (await factory.createVault(wS, USSD, BIN_STEP, 100, 10, SEED0, SEED1)).wait();
+  await new ethers.Contract(USSD, ERC20, deployer).approve(await factory.getAddress(), seed1);
+  await (await factory.createVault(wS, USSD, BIN_STEP, 100, 10, SEED0, seed1)).wait();
 
   const vaultAddr = await factory.vaultForPair(PAIR);
   const vault = await ethers.getContractAt("StratusDLMMVault", vaultAddr);
@@ -98,15 +160,19 @@ async function main() {
   await fundFromExternal(wS, lender.address, LEND_WS);
   await new ethers.Contract(wS, ERC20, lender).transfer(lp.borrowable0, LEND_WS);
   await (await (await ethers.getContractAt("Borrowable", lp.borrowable0, lender)).mint(lender.address)).wait();
-  await fundFromExternal(USSD, lender.address, LEND_USSD);
-  await new ethers.Contract(USSD, ERC20, lender).transfer(lp.borrowable1, LEND_USSD);
+  await fundFromExternal(USSD, lender.address, lendUssd);
+  await new ethers.Contract(USSD, ERC20, lender).transfer(lp.borrowable1, lendUssd);
   await (await (await ethers.getContractAt("Borrowable", lp.borrowable1, lender)).mint(lender.address)).wait();
 
   // --- fund the real user wallet with test tokens + gas ---
   await ethers.provider.send("hardhat_setBalance", [USER, "0x1b27a8b3fb5be0989f"]); // ~500 S (keeps real balance)
-  await fundFromExternal(wS, USER, ethers.parseEther("20"));
-  await fundFromExternal(USSD, USER, ethers.parseEther("1"));
-  console.log("funded user:", USER);
+  await fundFromExternal(wS, USER, USER_WS);
+  // Whatever USSD the source has left after the seed and lend legs (capped at 1), so the
+  // user can still test a two-sided deposit without over-drawing a thin source.
+  const ussdLeft: bigint = await new ethers.Contract(USSD, ERC20, ethers.provider).balanceOf(ussdSource);
+  const userUssd = ussdLeft < ethers.parseEther("1") ? (ussdLeft * 80n) / 100n : ethers.parseEther("1");
+  if (userUssd > 0n) await fundFromExternal(USSD, USER, userUssd);
+  console.log("funded user:", USER, "with", ethers.formatEther(userUssd), "USSD");
 
   // --- write config for the UI (reuses the shared routers from fork-ui/config.json) ---
   const mainCfgPath = path.join(__dirname, "..", "fork-ui", "config.json");
