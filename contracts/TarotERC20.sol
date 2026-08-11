@@ -4,9 +4,6 @@ pragma solidity ^0.8.27;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-// This contract is basically UniswapV2ERC20 with small modifications
-// src: https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/UniswapV2ERC20.sol
-
 contract TarotERC20 is IERC20, IERC20Metadata {
     // --- Custom Errors ---
     error TransferTooHigh();
@@ -62,15 +59,8 @@ contract TarotERC20 is IERC20, IERC20Metadata {
         );
     }
 
-    /// @notice EIP-712 domain separator. The original UniswapV2ERC20-style implementation
-    ///         computed this once at deploy time and cached it in a plain state variable —
-    ///         a pre-0.8-era pattern with a real gap: if the chain ever hard-forks such that
-    ///         a copy of this contract ends up live on a new chainid, the stale separator
-    ///         (still encoding the OLD chainid) would keep validating signatures meant only
-    ///         for the original chain, letting a permit/borrowPermit be replayed across both
-    ///         post-fork chains. This checks the live chainid against what's cached and
-    ///         recomputes on the fly if they've diverged — same construction OZ's EIP712
-    ///         base contract uses.
+    /// @notice EIP-712 domain separator. Uses the cached value when chainid matches deploy,
+    ///         otherwise recomputes so permits cannot be replayed across a chain fork.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         if (block.chainid == _cachedChainId) {
             return _cachedDomainSeparator;
@@ -150,9 +140,7 @@ contract TarotERC20 is IERC20, IERC20Metadata {
         bytes32 typehash
     ) internal {
         if (deadline < block.timestamp) revert Expired();
-        // Read-then-consume the nonce so the signature cannot be replayed. The previous
-        // version was `view` and never incremented, which left borrowPermit replayable
-        // (a revoked borrow allowance could be re-granted with an old signature).
+        // Read-then-consume the nonce so the signature cannot be replayed.
         uint256 currentNonce = nonces[owner];
         bytes32 digest =
             keccak256(

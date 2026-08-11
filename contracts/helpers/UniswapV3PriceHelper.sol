@@ -74,10 +74,8 @@ library UniswapV3PriceHelper {
     /// @notice Convert a Q64.96 sqrt price to a 1e18-scaled price (token1 per token0)
     /// @param sqrtPriceX96 The sqrt price in Q64.96 format (sqrt(price) * 2^96)
     /// @return price The price scaled to 1e18 precision
-    /// @dev price = (sqrtPriceX96 / 2^96)^2 * 1e18. Uses Math.mulDiv so the
-    ///      intermediate sqrtPriceX96^2 (up to 2^320) cannot overflow and no
-    ///      precision is lost for sub-integer prices. The previous version
-    ///      shifted right by 192 first, truncating any ratio < 2^96 to zero.
+    /// @dev price = (sqrtPriceX96 / 2^96)^2 * 1e18. Math.mulDiv keeps the intermediate
+    ///      sqrtPriceX96^2 (up to 2^320) exact so sub-integer prices do not truncate to zero.
     function _sqrtPriceX96ToPrice(uint160 sqrtPriceX96) private pure returns (uint256 price) {
         // ratioX96 = sqrtPriceX96^2 / 2^96  == price * 2^96
         uint256 ratioX96 = Math.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);

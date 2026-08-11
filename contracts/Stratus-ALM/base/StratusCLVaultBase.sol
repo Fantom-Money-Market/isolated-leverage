@@ -178,7 +178,15 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
     /// @dev burn(0) forces the pool to recompute owed fees; collect pulls them. On a
     ///      gauged pool (Shadow) fees route to the FeeCollector, so this yields ~0 and the
     ///      LP earns emissions instead. On a fee-only pool (Thick) this is the yield.
+    /// @dev The protocol cut is SKIMMED IN TOKENS here and never taken by minting shares.
+    ///      That is deliberate and holds for every venue: ALPT is lending collateral, and
+    ///      Collateral.getPrices() prices it as `totalSupply / getTotalValueSafe()`, so
+    ///      minting fee shares would raise supply without raising value and mark down every
+    ///      open borrow's health at the instant the protocol pays itself. Skimming the
+    ///      realized fee leaves value per share untouched.
     function _realizeFees() internal override {
+        uint256 gross0;
+        uint256 gross1;
         uint256 totalFee0;
         uint256 totalFee1;
         for (uint256 i = 0; i < N_RANGES; i++) {
@@ -192,10 +200,13 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
             uint256 fee1 = (owed1 * protocolFee) / 100;
             if (fee0 > 0) token0.safeTransfer(factory, fee0);
             if (fee1 > 0) token1.safeTransfer(factory, fee1);
+            gross0 += owed0;
+            gross1 += owed1;
             totalFee0 += fee0;
             totalFee1 += fee1;
         }
-        if (totalFee0 > 0 || totalFee1 > 0) emit FeesCollected(totalFee0, totalFee1, totalFee0, totalFee1);
+        // FeesCollected(gross0, gross1, protocolFee0, protocolFee1).
+        if (gross0 > 0 || gross1 > 0) emit FeesCollected(gross0, gross1, totalFee0, totalFee1);
     }
 
     // ===================== REBALANCE =====================
@@ -378,16 +389,9 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
         }
     }
 
-    /// @dev Deploy the idle pot across the current ranges by CAPITAL weight (_weight(i), e.g.
-    ///      50/30/20 narrow/medium/wide) — each range takes its OWN natural token mix at spot,
-    ///      pre-scaled by _reqAtRange so the range's VALUE (not raw liquidity) matches its
-    ///      weight, then all ranges are scaled together by one global factor so the binding
-    ///      token is fully used. (An earlier version split each token by weight directly,
-    ///      forcing every range to the global ratio and stranding inventory on whichever side
-    ///      each range didn't bind — a misallocation that masqueraded as a two-sided deficit.
-    ///      A later bug fed the weight straight in as a liquidity unit count instead of a
-    ///      value share, which silently inverted the split since wide ranges need far more
-    ///      token amount per unit of liquidity than narrow ones — see _reqAtRange.)
+    /// @dev Deploy idle balances by capital weight (_weight(i)). Each range takes its own
+    ///      natural token mix at spot via _reqAtRange (value-proportional, not raw liquidity
+    ///      units), then one global scale factor fully uses the binding token.
     function _deployByWeight() internal {
         (uint160 sqrtP, , , , , , ) = ICLPoolView(pool).slot0();
         uint256 bal0 = token0.balanceOf(address(this));
@@ -423,18 +427,11 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
         }
     }
 
-    /// @dev Token0/token1 a range of weight `w` wants, sized so the range's VALUE (not raw
-    ///      liquidity) is proportional to `w`. First computes this range's natural token mix
-    ///      at a fixed reference liquidity (REQ_SCALE), values that mix in token1 terms at
-    ///      the current price, then scales by w/refValue.
-    /// @dev Uniswap V3 liquidity is not value-linear across range widths — a wide range needs
-    ///      far more token amount than a narrow one to represent the same liquidity (that's
-    ///      the whole point of concentration). Scaling by raw liquidity units alone (feeding
-    ///      w*REQ_SCALE directly into getAmountsForLiquidity, the previous implementation)
-    ///      silently inverted the intended weight split: the nominal 50/30/20 (narrow/medium/
-    ///      wide) weights actually deployed ~13/31/56 of real capital, because the wide range
-    ///      consumes disproportionately more tokens per unit of liquidity. Scaling by value
-    ///      instead makes the deployed capital share match the configured weight directly.
+    /// @dev Token0/token1 a range of weight `w` wants so its VALUE (not raw liquidity) is
+    ///      proportional to `w`. Take the natural mix at REQ_SCALE liquidity, value it in
+    ///      token1 at the current price, then scale by w/refValue. CL liquidity is not
+    ///      value-linear across widths — wide ranges need more tokens per unit of liquidity —
+    ///      so scaling by value keeps deployed capital share aligned with configured weights.
     function _reqAtRange(int24 lower, int24 upper, uint160 sqrtP, uint256 w)
         internal
         pure
@@ -460,16 +457,13 @@ abstract contract StratusCLVaultBase is StratusVaultBase {
         price = Math.mulDiv(ratioX96, PRECISION, Q96);
     }
 
-    /// @notice Preview the next rebalance's GENUINE token imbalance. After a full burn the vault
-    ///         is one idle pot; deploying by capital weight (see _deployByWeight) uses the
-    ///         binding token fully and leaves the OTHER side over. This reports that one-sided
-    ///         residual: `need*` is how much of the deficit token to inject to deploy everything,
-    ///         `surplus*` is what stays idle if nothing is injected. Exactly one of need0/need1
-    ///         (and of surplus0/surplus1) is non-zero — it is a global ratio mismatch between the
-    ///         idle pot and what the ranges collectively want, never a simultaneous two-sided
-    ///         deficit (that earlier artefact was per-range misallocation, now fixed internally).
-    /// @dev Estimate over idle + current positions, at the TWAP-tick ranges (as rebalance sets
-    ///      them) and spot price (as it deploys). Ignores the small protocol-fee skim on fees.
+    /// @notice Preview the next rebalance's one-sided token imbalance. After a full burn the
+    ///         vault is one idle pot; capital-weight deploy uses the binding token fully and
+    ///         leaves the other side over. `need*` is deficit to inject for full deploy;
+    ///         `surplus*` stays idle otherwise. Exactly one of need0/need1 (and of surplus0/
+    ///         surplus1) is non-zero — a global ratio mismatch, not a two-sided deficit.
+    /// @dev Estimate over idle + current positions, at TWAP-tick ranges and spot price.
+    ///      Ignores the small protocol-fee skim on fees.
     function previewRebalance()
         public
         view

@@ -82,14 +82,8 @@ contract StratusDLMMVaultFactory is Ownable {
     ) external onlyOwner returns (address vault) {
         address pairAddr = _resolvePair(tokenA, tokenB, binStep);
 
-        // Activate/extend the pair's oracle BEFORE the vault exists, so the market has a
-        // shot at a real TWAP. The vault's safe price fails closed (StratusDLMMVaultBase
-        // .UnsafePrice) rather than falling back to the swap-movable active bin, so a pair
-        // whose oracle was never switched on would be permanently unpriceable — and the
-        // history only starts accumulating once it is on. increaseOracleLength is
-        // permissionless and flips the oracle on when unused, but REVERTS if asked to
-        // shrink, hence the size check. Not wrapped in try/catch on purpose: failing here,
-        // loudly, beats shipping a market that can never price its collateral.
+        // Oracle history only accumulates once the ring buffer is active. Grow it here so
+        // the vault can serve a TWAP; increaseOracleLength reverts if asked to shrink.
         (, uint16 oracleSize, , , ) = ILBPair(pairAddr).getOracleParameters();
         if (oracleSize < DESIRED_ORACLE_LENGTH) {
             ILBPair(pairAddr).increaseOracleLength(DESIRED_ORACLE_LENGTH);

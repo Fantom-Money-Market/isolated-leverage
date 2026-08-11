@@ -323,28 +323,13 @@ contract StratusBeetsV3Adapter is ERC20, ReentrancyGuard {
     }
 
     /// @notice Total value of the adapter's backing in token1 base units, anchored to the
-    ///         pool INVARIANT rather than to its live reserve vector.
-    /// @dev This previously summed the rate-normalized reserves
-    ///      (total1 + total0 x price0in1) and claimed that a swap "conserves that sum".
-    ///      It does not. A swap moves the pool off market price and the pool keeps the
-    ///      slippage, so the rate-priced reserve SUM rises as the pool is skewed — it is
-    ///      minimized at balance. That let an attacker skew the pool, borrow against the
-    ///      inflated collateral value, and unwind in the same transaction, leaving debt
-    ///      above the terminal value of the BPT.
-    ///
-    ///      The invariant is the quantity actually conserved under swaps (it grows only
-    ///      from fees), so it is the correct anchor. Balancer exposes it directly:
-    ///      pool.getRate() == Vault.getBptRate(pool) == computeInvariant(balancesLiveScaled18)
-    ///      / bptTotalSupply, i.e. scaled18 value per BPT.
-    ///
-    ///      Converting that to token1 base units: a scaled18 amount maps back to raw via
-    ///      raw_i = scaled18 * 1e18 / (sf_i * rate_i), and our scaled18 holding is
-    ///      supply * bptRate / 1e18, which reduces to supply * bptRate / (sf1 * rate1).
-    ///
-    ///      Deliberately inconsistent with getTotalAmounts(), which still reports the live
-    ///      pro-rata reserves (what an exit really pays out today). When the pool is skewed
-    ///      this value sits BELOW amounts x price — the conservative side, which is what a
-    ///      collateral valuation should do.
+    ///         pool invariant (Balancer BPT rate), not the live reserve vector.
+    /// @dev Rate-priced reserve sums rise when the pool is skewed (slippage stays in-pool),
+    ///      so they are not swap-invariant and are unsafe as collateral. The invariant /
+    ///      bptRate is conserved under swaps (grows only from fees):
+    ///      getRate() == computeInvariant(balancesLiveScaled18) / bptTotalSupply.
+    ///      Convert to token1: supply * bptRate / (sf1 * rate1).
+    ///      Deliberately ≤ getTotalAmounts()-implied value when skewed — conservative for lending.
     function getTotalValueSafe() public view returns (uint256 value) {
         uint256 supply = totalSupply();
         if (supply == 0) return 0;

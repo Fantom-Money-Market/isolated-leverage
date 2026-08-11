@@ -151,11 +151,8 @@ contract TarotFactory is IFactory {
             revert Borrowable1NotCreated();
         }
 
-        // NOTE: the external TarotPriceOracle is no longer used. Collateral.getPrices()
-        // now reads the underlying's own manipulation-resistant safe surface
-        // (getTotalValueSafe / twapPrice), so there is no per-pair oracle to initialize.
-        // Calling it here would also revert for venues without a UniV3 pool (e.g. the
-        // Beets adapter), bricking pool creation.
+        // Pricing comes from the underlying ALPT (getTotalValueSafe / twapPrice); there is
+        // no separate per-pair oracle to initialize here.
 
         // Initialize collateral and borrowable tokens
         ICollateral(lPool.collateral)._initialize(

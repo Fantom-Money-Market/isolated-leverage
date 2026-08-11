@@ -26,13 +26,11 @@ interface ILevCollateral {
     function borrowable1() external view returns (address);
 }
 
-/// @notice One-call leverage for Stratus ALPT lending pools — the Tarot/Impermax Router
-///         "leverage" pattern. The user's own tokens plus flash-borrowed tokens from both
-///         Borrowables are deposited into the vault, and the resulting ALPT is posted as
-///         the user's collateral, all inside a single transaction. This works because
-///         Borrowable.borrow() transfers funds and invokes the callback BEFORE its
-///         solvency check — by the time canBorrow() runs, the leveraged collateral is
-///         already minted to the borrower.
+/// @notice One-call leverage for Stratus ALPT lending pools. The user's own tokens plus
+///         flash-borrowed tokens from both Borrowables are deposited into the vault, and
+///         the resulting ALPT is posted as collateral in one transaction. Works because
+///         Borrowable.borrow() transfers and callbacks before its solvency check — by the
+///         time canBorrow() runs, the leveraged collateral is already minted.
 /// @dev Trust model: holds no funds between transactions and has no owner/admin. The
 ///      borrower must have called borrowApprove(router) on each Borrowable being drawn
 ///      from; the Borrowables themselves enforce post-callback solvency. The callback is

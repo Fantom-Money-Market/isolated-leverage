@@ -20,7 +20,9 @@ library LiquidityBookMath {
     error PriceOverflow();
 
     /// @notice Price of one tokenX in tokenY (1e18 fixed point) at bin `id`.
-    function getPriceFromId(uint24 id, uint16 binStep) internal pure returns (uint256 price) {
+    /// @dev Public (linked library) so StratusDLMMVaultDeployer stays under the EIP-170
+    ///      creation-code size limit. Callers must link against a deployed LiquidityBookMath.
+    function getPriceFromId(uint24 id, uint16 binStep) public pure returns (uint256 price) {
         int256 realId = int256(uint256(id)) - int256(REAL_ID_SHIFT);
         uint256 base = PRECISION + Math.mulDiv(uint256(binStep), PRECISION, BASIS_POINTS);
         price = _pow(base, realId);
@@ -48,13 +50,9 @@ library LiquidityBookMath {
     /// @notice Pack one bin's liquidity-mint config: `distributionX`/`distributionY` are
     ///         1e18-scale fractions of the deposit each bin receives (LB's own convention,
     ///         independent of this codebase's PRECISION reuse above), `id` the target bin.
-    /// @dev Layout matches Metropolis' LiquidityConfigurations.encodeParams (verified
-    ///      against the real source, joe-v2/src/libraries/math/LiquidityConfigurations.sol):
-    ///      id in bits [0,24), distributionY in bits [24,88), distributionX in bits [88,152).
-    ///      An earlier version of this function had id at bit 128 — wrong, and the reason
-    ///      every mint() attempt reverted with PackedUint128Math__SubUnderflow regardless of
-    ///      distribution shape (the pair was decoding garbage bin ids from the misaligned
-    ///      packing, not the ids this contract intended).
+    /// @dev Layout matches Metropolis LiquidityConfigurations.encodeParams:
+    ///      id [0,24), distributionY [24,88), distributionX [88,152).
+    ///      Internal (inlined) — few enough call sites that linking would cost more bytecode.
     function encodeLiquidityConfig(uint64 distributionX, uint64 distributionY, uint24 id)
         internal
         pure

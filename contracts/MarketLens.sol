@@ -69,13 +69,9 @@ interface ILensErc20 {
 ///         The frontend needs exactly ONE address per chain (this lens) instead of a
 ///         hand-maintained per-market config.
 /// @dev Functions are deliberately non-view where the underlying protocol getters mutate
-///      (exchangeRate/accountLiquidity accrue interest) — call them via eth_call and
-///      declare them `view` in the client ABI, the standard Impermax/Tarot lens pattern.
-///      Holds no funds; the only state is the factory registry and venue-kind overrides.
+///      (exchangeRate/accountLiquidity accrue interest) — call via eth_call and treat as
+///      view in the client ABI. Holds no funds; state is the factory registry and kind overrides.
 contract MarketLens {
-    /// @notice DLMM is a declared-but-unimplemented venue kind (future work): the enum
-    ///         slot and the kind-override registry are the extension points, so adding a
-    ///         DLMM adapter later requires no lens redeploy — just setKindOverride.
     enum VenueKind {
         UNKNOWN,
         SHADOW_CL,
@@ -139,8 +135,7 @@ contract MarketLens {
     address public owner;
     address[] public factories;
     mapping(address => bool) public isFactory;
-    /// @dev alpt => forced kind; overrides feature detection (and the only path to DLMM
-    ///      until a DLMM adapter defines its own detectable surface).
+    /// @dev alpt => forced kind; overrides automatic feature detection when needed.
     mapping(address => VenueKind) public kindOverride;
 
     event FactoryAdded(address indexed factory);

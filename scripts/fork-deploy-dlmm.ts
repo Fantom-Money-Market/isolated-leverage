@@ -104,8 +104,20 @@ async function main() {
   const [deployer, lender] = await ethers.getSigners();
   console.log("deployer:", deployer.address);
 
+  // LiquidityBookMath.getPriceFromId is a PUBLIC library function (deployed once, linked by
+  // address) rather than an inlined internal one — inlining its exponentiation-by-squaring
+  // loop at every call site pushed StratusDLMMVaultDeployer over EIP-170. The link has to be
+  // supplied here because the factory constructor does `new StratusDLMMVaultDeployer()`, so
+  // the factory's own bytecode transitively contains the vault's creation code.
+  const lbMath = await (await ethers.getContractFactory("LiquidityBookMath", deployer)).deploy();
+  await lbMath.waitForDeployment();
+  console.log("lbMath :", await lbMath.getAddress());
+
   const factory = await (
-    await ethers.getContractFactory("StratusDLMMVaultFactory", deployer)
+    await ethers.getContractFactory("StratusDLMMVaultFactory", {
+      signer: deployer,
+      libraries: { LiquidityBookMath: await lbMath.getAddress() },
+    })
   ).deploy(LB_FACTORY, METRO);
   await factory.waitForDeployment();
   console.log("factory:", await factory.getAddress());

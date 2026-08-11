@@ -7,7 +7,13 @@ const wS = "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38";
 const USDCe = "0x29219dd400f2Bf60E5a23d13Be72B486D4038894";
 const SHADOW = "0x3333b97138D4b086720b5aE8A7844b1345a33333";
 const GAUGE = "0xe879d0E44e6873cf4ab71686055a4f6817685f02";
-const VAULT = process.env.VAULT || "0xd559FEFB23283AFED6e1B720369DD55e7C80fFf9";
+// Read the LIVE Shadow vault out of the config this script also writes to, rather than
+// pinning an address. A hardcoded default silently survives a fork reset and then fails
+// deep inside the poke with an undecodable `rangeLower` result, which reads like a contract
+// bug rather than a stale constant.
+const VAULT =
+  process.env.VAULT ||
+  JSON.parse(fs.readFileSync(path.join(__dirname, "..", "fork-ui", "config.json"), "utf8")).vault;
 const MAX_SQRT = 1461446703485210103287273052203988822378723970342n;
 const WEEK = 604800n;
 

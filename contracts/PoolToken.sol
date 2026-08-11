@@ -65,9 +65,7 @@ contract PoolToken is IPoolToken, TarotERC20 {
         mintTokens = (mintAmount * 1e18) / exchangeRate();
 
         if (totalSupply == 0) {
-            // permanently lock the first MINIMUM_LIQUIDITY tokens. Explicit check instead of
-            // letting the subtraction underflow-revert with a bare Panic(0x11): a first
-            // deposit too small to clear the floor now fails with a clear reason.
+            // Lock MINIMUM_LIQUIDITY forever. Dust below that floor reverts MintAmountTooSmall.
             if (mintTokens <= MINIMUM_LIQUIDITY) revert MintAmountTooSmall();
             mintTokens -= MINIMUM_LIQUIDITY;
             _mint(address(0), MINIMUM_LIQUIDITY);

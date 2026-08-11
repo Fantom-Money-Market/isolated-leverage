@@ -180,29 +180,16 @@ abstract contract StratusVaultBase is ERC20, ReentrancyGuard {
 
         _realizeFees();
 
-        // Entry is priced at the SAFE price, but withdraw() pays out a pro-rata slice of the
-        // LIVE basket. Those are different bases, and whenever safe and spot diverge a
-        // one-sided deposit of whichever asset the safe price over-values mints more shares
-        // than the live basket backs — deposit, redeem immediately, and the difference comes
-        // out of existing holders. Pro-rata exit is the right (unmanipulable) primitive, so
-        // the fix belongs on entry: price the deposit BOTH ways and mint the lesser.
-        //
-        // Which price flatters the depositor depends on the deposit's mix versus the vault's:
-        // shares grow with price for a token0-heavy deposit and shrink for a token1-heavy
-        // one, so no single price is conservative for both. Taking the minimum is, for any
-        // mix and either direction of divergence, which removes the round-trip profit
-        // entirely. Manipulating spot can only ever reduce the attacker's own share count;
-        // an honest depositor is protected by minShares.
+        // Withdraw pays a pro-rata slice of the live basket; entry must not mint more shares
+        // than that basket backs when safe and spot diverge. Price the deposit both ways and
+        // mint the lesser — conservative for any mix / either direction of divergence.
+        // Manipulating spot can only reduce the attacker's own shares; honest depositors use minShares.
         (uint256 pt0, uint256 pt1) = _totalAmountsSpot();
         uint256 sharesSpot = _sharesFor(deposit0, deposit1, pt0, pt1, _spotPrice());
 
         if (totalSupply() == 0) {
-            // Bootstrap: there are no existing holders to dilute and no ALPT posted as
-            // collateral anywhere, so the safe-price leg protects nobody — while a venue
-            // whose oracle was only just activated (DLMM) genuinely cannot produce one for
-            // its first TWAP window. Requiring it here would make a fresh vault
-            // un-seedable. Manipulating spot on an empty vault only changes the seeder's
-            // own share count.
+            // Bootstrap: no existing holders to protect, and some venues (DLMM) cannot serve
+            // a safe price until the oracle has history. Spot-only minting is fine here.
             shares = sharesSpot;
         } else {
             (uint256 st0, uint256 st1, uint256 safePrice) = _safeValuation();
@@ -338,11 +325,9 @@ abstract contract StratusVaultBase is ERC20, ReentrancyGuard {
         return rewardsAccrued[token][user] + unsettled;
     }
 
-    /// @dev Credit `net` of `token` across the current supply (called by adapters that
-    ///      harvest emissions). Caller is responsible for having received the tokens.
-    /// @dev Denominator includes VIRTUAL_SHARES (same floor as deposit/withdraw) so a
-    ///      harvest landing while real supply is ~0 (e.g. only locked seed shares, no
-    ///      depositors yet) can't blow the accumulator up by an unbounded factor.
+    /// @dev Credit `net` of `token` across current supply (caller already holds the tokens).
+    ///      Denominator includes VIRTUAL_SHARES so a harvest at near-zero real supply cannot
+    ///      inflate the accumulator unboundedly.
     function _distributeReward(address token, uint256 net) internal {
         if (!isRewardToken[token] || net == 0) return;
         rewardPerShareStored[token] += Math.mulDiv(net, ACC_PRECISION, totalSupply() + VIRTUAL_SHARES);

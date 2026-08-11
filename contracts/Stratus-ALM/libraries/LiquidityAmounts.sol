@@ -4,10 +4,8 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title Liquidity amount functions
-/// @notice Provides functions for computing liquidity amounts from token amounts and prices
-/// @dev Ported to 0.8.x: uses OpenZeppelin Math.mulDiv (512-bit, overflow-safe) in place of
-///      the legacy uniswap-v3-core FullMath, which pins solidity below 0.8.0 and is
-///      incompatible with this stack. Q96 / RESOLUTION are inlined to drop FixedPoint96 too.
+/// @notice Computes liquidity amounts from token amounts and prices (Uniswap V3 style).
+/// @dev Uses OpenZeppelin Math.mulDiv; Q96 / RESOLUTION inlined (no FixedPoint96 dependency).
 library LiquidityAmounts {
     uint256 internal constant Q96 = 0x1000000000000000000000000; // 2**96
     uint8 internal constant RESOLUTION = 96;

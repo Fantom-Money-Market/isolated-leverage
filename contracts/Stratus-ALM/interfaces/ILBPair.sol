@@ -2,12 +2,9 @@
 pragma solidity ^0.8.26;
 
 /// @title ILBPair
-/// @notice Minimal Metropolis (Trader Joe Liquidity Book v2.1/v2.2 fork) DLMM pair
-///         interface: ERC1155-per-bin liquidity, not a single fungible pool token.
-/// @dev Verified by direct on-chain probing against a live Sonic pair
-///      (0x361F55337074ae43957204CB30fFBAbbCe4Fb837, wS/USSD binStep=10) through a
-///      mainnet fork. `mint`/`burn` amounts are packed bytes32 (X in the low 128 bits,
-///      Y in the high 128 bits) — see LiquidityBookMath.decodeAmounts.
+/// @notice Minimal Metropolis Liquidity Book DLMM pair interface (ERC1155-per-bin).
+/// @dev mint/burn amounts are packed bytes32 (X low 128, Y high 128) — see
+///      LiquidityBookMath.decodeAmounts.
 interface ILBPair {
     function getTokenX() external view returns (address);
     function getTokenY() external view returns (address);
@@ -80,13 +77,8 @@ interface ILBFactory {
 }
 
 /// @title ILBHooksRewarder
-/// @notice Minimal interface for Metropolis' "LB Hooks Metro Rewarder" — a per-pair hook
-///         (deployed as a minimal-proxy clone) that pays METRO emissions to liquidity
-///         sitting within a narrow, owner-configurable bin window around the active bin.
-/// @dev Verified by direct on-chain probing (function-selector brute force + bytecode
-///      analysis of the clone's implementation, `LBHooksMCRewarder`, verified source at
-///      0xd7182dc736Cd322CA03312127d5291a5aF2fa610 on Sonicscan). Only the bin ids inside
-///      getRewardedRange() earn METRO; liquidity outside it earns trading fees only.
+/// @notice Metropolis per-pair reward hook: METRO emissions for liquidity inside an
+///         owner-configurable bin window. Only bins in getRewardedRange() earn METRO.
 interface ILBHooksRewarder {
     function getRewardToken() external view returns (address);
     function getRewardedRange() external view returns (uint256 binStart, uint256 binEnd);

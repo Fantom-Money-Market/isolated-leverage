@@ -25,24 +25,15 @@ contract Collateral is ICollateral, PoolToken {
     error InsufficientRedeemTokens();
     // MintAmountTooSmall is inherited from PoolToken (same guard, same base pattern).
 
-    // --- State Variables (formerly CStorage) ---
     address public borrowable0;
     address public borrowable1;
 
-    // --- Vault reward redistribution (MasterChef accumulator over cToken balances) ---
-    // The Collateral contract is the ALPT holder, so the vault's gauge emissions accrue
-    // to THIS address. We claim them (harvestVaultRewards) and pass them through to
-    // cToken holders pro-rata, in-kind — no selling, no streaming. Same accumulator
-    // math as the vault itself (and MasterChef): rewardPerShare checkpoints settled on
-    // every cToken balance change, including seize().
-    // Carries the same two fixes the vault's accumulator needed after a live incident:
-    // (1) harvestVaultRewards floors its denominator with +MINIMUM_LIQUIDITY so a harvest
-    // landing right after the first mint (supply == the locked floor, no real holder yet)
-    // can't inflate rewardPerShareStored by an unbounded factor; (2) _settleVaultRewards /
-    // pendingVaultReward use Math.mulDiv instead of raw `*`/`/`, so an already-extreme
-    // accumulator can't overflow-revert the multiply — critically, _settleVaultRewards runs
-    // inside seize(), so an unguarded overflow there would have blocked liquidation of an
-    // underwater borrower, not just one user's claim.
+    // --- Vault reward redistribution (MasterChef-style accumulator over cToken balances) ---
+    // This contract holds the ALPT, so vault emissions accrue here. harvestVaultRewards
+    // claims them and credits cToken holders pro-rata in-kind. Checkpoints settle on every
+    // balance change (mint/redeem/transfer/seize). Denominator is floored with
+    // +MINIMUM_LIQUIDITY; accrual uses Math.mulDiv so extreme accumulators cannot overflow
+    // on settle (including inside seize()).
     uint256 internal constant REWARD_ACC_PRECISION = 1e18;
     address[] public vaultRewardTokens;
     mapping(address => bool) public isVaultRewardToken;
@@ -101,10 +92,7 @@ contract Collateral is ICollateral, PoolToken {
         mintTokens = (mintAmount * 1e18) / exchangeRate();
 
         if (totalSupply == 0) {
-            // permanently lock the first MINIMUM_LIQUIDITY tokens. Explicit check instead of
-            // letting the subtraction underflow-revert with a bare Panic(0x11): a deposit
-            // too small to clear the floor (< 1000 wei-equivalent of cToken, i.e. dust) now
-            // fails with a clear reason instead of an opaque panic.
+            // Lock MINIMUM_LIQUIDITY forever. Dust below that floor reverts MintAmountTooSmall.
             if (mintTokens <= MINIMUM_LIQUIDITY) revert MintAmountTooSmall();
             mintTokens -= MINIMUM_LIQUIDITY;
             _mint(address(0), MINIMUM_LIQUIDITY);
@@ -151,13 +139,11 @@ contract Collateral is ICollateral, PoolToken {
     /*** Collateralization Model ***/
 
     /// @notice Collateral price of one underlying (LP/ALPT/adapter) token in each
-    ///         borrowable token. Sourced entirely from the underlying's manipulation-
-    ///         resistant safe surface (TWAP for CL vaults, rate providers for the Beets
-    ///         adapter) — no spot slot0 read and no external TWAP-oracle reconciliation.
-    /// @dev price_i has units "collateral tokens per token_i" (1e18-scaled), i.e.
-    ///      supply / value_in_token_i, exactly as _calculateLiquidity and seize expect.
-    ///      Generalizes the old 50/50 `total*2` assumption to the real safe value, so it
-    ///      is correct for weighted/stable pools too.
+    ///         borrowable token. Sourced from the underlying's safe surface
+    ///         (getTotalValueSafe / twapPrice) — no spot slot0 read.
+    /// @dev price_i is "collateral tokens per token_i" (1e18-scaled), i.e.
+    ///      supply / value_in_token_i, as _calculateLiquidity and seize expect.
+    ///      Uses the real safe NAV, so weighted/stable pools price correctly.
     function getPrices() public view returns (uint256 price0, uint256 price1) {
         uint256 supply = IStratusALPT(underlying).totalSupply();
         uint256 valueInToken1 = IStratusALPT(underlying).getTotalValueSafe(); // token1 base units
@@ -201,20 +187,13 @@ contract Collateral is ICollateral, PoolToken {
 
     /*** Vault Reward Redistribution ***/
 
-    /// @notice Claim the underlying vault's accrued rewards (e.g. SHADOW gauge emissions)
+    /// @notice Claim the underlying vault's accrued rewards (e.g. gauge emissions)
     ///         to this contract and credit them to the accumulator. Permissionless — also
     ///         invoked from claimVaultRewards so a claim is always up to date.
-    /// @dev No-ops (never reverts) when the underlying has no reward surface (Beets
-    ///      adapter) or no supply exists yet, so it is safe to call unconditionally.
-    /// @dev claimRewards() is deliberately NOT wrapped in try/catch (unlike
-    ///      rewardTokensList() above, which legitimately no-ops for underlyings that don't
-    ///      implement the interface at all). A try/catch here let a starved nested call
-    ///      fail silently while the outer tx still reported success — worse, it gave gas
-    ///      estimators two divergent "non-reverting" outcomes (inner call succeeds, or
-    ///      inner call is caught) to converge on, so an estimate could settle on the
-    ///      cheaper catch-path and under-fund the real one. A live test reproduced exactly
-    ///      that: the call returned success but silently moved nothing. Reverting loudly on
-    ///      genuine failure is the safer default for a fund-moving step.
+    /// @dev No-ops when the underlying has no reward surface or supply is zero.
+    ///      rewardTokensList() is try/caught (optional interface); claimRewards() is not —
+    ///      a fund-moving step should revert on genuine failure rather than report success
+    ///      while transferring nothing (and so that gas estimators do not underprice it).
     function harvestVaultRewards() public {
         uint256 supply = totalSupply;
         if (supply == 0) return;
@@ -242,11 +221,8 @@ contract Collateral is ICollateral, PoolToken {
                 isVaultRewardToken[token] = true;
                 vaultRewardTokens.push(token);
             }
-            // +MINIMUM_LIQUIDITY floors the denominator (same defense as the vault's
-            // VIRTUAL_SHARES fix) so a harvest landing right after the first mint — when
-            // supply is just the locked MINIMUM_LIQUIDITY floor and no real holder exists
-            // yet — can't blow the accumulator up by an unbounded factor. This is the exact
-            // live incident that hit the vault's own accumulator, reproduced here.
+            // Floor the denominator with MINIMUM_LIQUIDITY so a harvest at near-zero
+            // real supply cannot inflate rewardPerShareStored unboundedly.
             rewardPerShareStored[token] += Math.mulDiv(received, REWARD_ACC_PRECISION, supply + MINIMUM_LIQUIDITY);
             emit VaultRewardsHarvested(token, received);
         }
@@ -329,15 +305,9 @@ contract Collateral is ICollateral, PoolToken {
         super._transfer(from, to, value);
     }
 
-    /// @dev borrowBalance() is a view over each Borrowable's LAST-accrued borrowIndex, so
-    ///      any solvency check that reads it without accruing first understates debt by the
-    ///      interest owed since that market was last touched. Borrowable.borrow() carries an
-    ///      `accrue` modifier for ITSELF only, which leaves the opposite leg stale on every
-    ///      two-sided position — enough to pass a health check that current debt would fail,
-    ///      then remove collateral or borrow again before anyone refreshes it.
-    ///      accrueInterest() is unguarded and no-ops when already accrued this timestamp
-    ///      (BInterestModel), so this is safe to call from inside a Borrowable's own
-    ///      nonReentrant borrow()/liquidate() and costs nothing when already current.
+    /// @dev borrowBalance() reflects each Borrowable's last-accrued index. Accrue both
+    ///      legs before any solvency check so two-sided positions are not understated.
+    ///      accrueInterest() is permissionless and no-ops if already accrued this timestamp.
     function _accrueBothBorrowables() internal {
         IBorrowable(borrowable0).accrueInterest();
         IBorrowable(borrowable1).accrueInterest();

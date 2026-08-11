@@ -18,6 +18,7 @@ interface IUnwindBorrowable {
     function borrowBalance(address borrower) external view returns (uint256);
     function exchangeRate() external returns (uint256); // accrue-modified: syncs interest
     function underlying() external view returns (address);
+    function redeem(address redeemer) external returns (uint256 redeemAmount);
 }
 
 interface IUnwindCollateral {
@@ -32,7 +33,7 @@ interface IUnwindCollateral {
 /// @dev Liquidity is the borrower's own ALPT collateral (cToken → underlying), never the
 ///      lend-side borrowable cash pools. flashRedeem temporarily releases ALPT; we break
 ///      it, repay debt, then pull cTokens from the borrower (after debt is reduced) to
-///      complete the burn — matching Impermax's callback ordering.
+///      complete the burn.
 contract UnwindRouter is ITarotCallee {
     using SafeERC20 for IERC20;
 
@@ -70,7 +71,7 @@ contract UnwindRouter is ITarotCallee {
         address b1 = col.borrowable1();
         if (vault == address(0) || b0 == address(0) || b1 == address(0)) revert BadCollateral();
 
-        // Impermax uses (tokens - 1) so declaredRedeemTokens fits in the post-callback burn.
+        // (cTokenAmount - 1) so declaredRedeemTokens fits in the post-callback burn.
         uint256 rate = col.exchangeRate();
         uint256 redeemAmount = ((cTokenAmount - 1) * rate) / 1e18;
         if (redeemAmount == 0) revert NothingToDo();
@@ -138,6 +139,22 @@ contract UnwindRouter is ITarotCallee {
         IUnwindBorrowable(borrowable).borrow(msg.sender, address(0), 0, "");
     }
 
+    /// @notice Atomic unlend: burn `tokens` of the caller's bTokens and send them the
+    ///         underlying in one transaction (exit counterpart to LeverageRouter.lend()).
+    /// @dev Borrowable.redeem() burns whatever bTokens sit on the Borrowable and pays the
+    ///      named redeemer — so transfer-then-redeem leaves a snipe window. Do both halves
+    ///      here; callers approve this router instead of transferring bTokens directly.
+    ///      redeem() pays the whole bToken balance on the Borrowable, so this transfers
+    ///      exactly the amount it will burn (no partial redeem).
+    /// @return amount Underlying sent to the caller.
+    function unlend(address borrowable, uint256 tokens) external returns (uint256 amount) {
+        if (expectedCaller != address(0)) revert Unauthorized();
+        if (tokens == 0) revert NothingToDo();
+
+        IERC20(borrowable).safeTransferFrom(msg.sender, borrowable, tokens);
+        amount = IUnwindBorrowable(borrowable).redeem(msg.sender);
+    }
+
     /// @inheritdoc ITarotCallee
     function tarotBorrow(address, address, uint256, bytes calldata) external pure {
         revert Unauthorized();
@@ -150,12 +167,8 @@ contract UnwindRouter is ITarotCallee {
         uint256 amountMax
     ) internal {
         if (amountMax == 0) return;
-        // Force an interest accrual before reading the debt. borrowBalance() is a view
-        // over the LAST-accrued borrow index, so without this the repay comes up short by
-        // whatever interest accrued since — dust, but a full unwind leaves zero collateral
-        // behind, and zero collateral against any dust debt fails tokensUnlocked and
-        // reverts the whole tx with InsufficientLiquidity. (Impermax's router does this
-        // same exchangeRate() poke before its repay for exactly this reason.)
+        // Accrue before reading debt — borrowBalance() uses the last-accrued index.
+        // A full unwind leaves zero collateral; any remaining dust debt fails tokensUnlocked.
         IUnwindBorrowable(borrowable).exchangeRate();
         uint256 debt = IUnwindBorrowable(borrowable).borrowBalance(borrower);
         uint256 repayAmount = amountMax < debt ? amountMax : debt;

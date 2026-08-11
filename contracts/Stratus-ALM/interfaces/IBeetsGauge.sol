@@ -2,7 +2,6 @@
 pragma solidity ^0.8.26;
 
 /// @notice Minimal Curve-style Child Liquidity Gauge on Beets/Balancer (Vyper).
-/// @dev Verified against the live stS-wS gauge on Sonic.
 interface IBeetsGauge {
     function lp_token() external view returns (address);
     function deposit(uint256 value, address user) external;

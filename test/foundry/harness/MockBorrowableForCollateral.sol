@@ -21,6 +21,10 @@ contract MockBorrowableForCollateral {
         borrowBalance[who] = amt;
     }
 
+    /// @dev Collateral.tokensUnlocked / accountLiquidity call this before reading borrowBalance.
+    ///      No-op is correct for the mock — balances are set explicitly by tests.
+    function accrueInterest() external {}
+
     function callSeize(address liquidator, address borrower, uint256 repayAmount) external returns (uint256) {
         return ICollateralSeize(collateral).seize(liquidator, borrower, repayAmount);
     }
